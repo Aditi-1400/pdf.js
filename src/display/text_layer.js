@@ -77,7 +77,7 @@ function getCtx() {
     // OffscreenCanvas.
     const canvas = document.createElement("canvas");
     canvas.className = "hiddenCanvasElement";
-    document.body.append(canvas);
+    document.querySelector("#viewer").append(canvas);
     _canvasContext = canvas.getContext("2d", { alpha: false });
   }
 
