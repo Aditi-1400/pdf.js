@@ -47,6 +47,7 @@ class TextLayerBuilder {
   constructor({
     highlighter = null,
     accessibilityManager = null,
+    language,
     enablePermissions = false,
   }) {
     this.textContentItemsStr = [];
@@ -57,7 +58,7 @@ class TextLayerBuilder {
     this.highlighter = highlighter;
     this.accessibilityManager = accessibilityManager;
     this.#enablePermissions = enablePermissions === true;
-
+    this.language = language;
     /**
      * Callback used to attach the textLayer to the DOM.
      * @type {function}
@@ -90,7 +91,6 @@ class TextLayerBuilder {
     if (!this.#textContentSource) {
       throw new Error('No "textContentSource" parameter specified.');
     }
-
     const scale = viewport.scale * (globalThis.devicePixelRatio || 1);
     const { rotation } = viewport;
     if (this.renderingDone) {
@@ -103,6 +103,7 @@ class TextLayerBuilder {
           viewport,
           textDivs: this.textDivs,
           textDivProperties: this.textDivProperties,
+          lang: this.language,
           mustRescale,
           mustRotate,
         });
@@ -124,6 +125,7 @@ class TextLayerBuilder {
       textDivs: this.textDivs,
       textDivProperties: this.textDivProperties,
       textContentItemsStr: this.textContentItemsStr,
+      lang: this.language,
     });
 
     await this.textLayerRenderTask.promise;

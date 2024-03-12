@@ -829,8 +829,9 @@ class PDFViewer {
 
     // Fetch a single page so we can get a viewport that will be the default
     // viewport for all pages
-    Promise.all([firstPagePromise, permissionsPromise])
-      .then(([firstPdfPage, permissions]) => {
+    const metadata = pdfDocument.getMetadata();
+    Promise.all([firstPagePromise, permissionsPromise, metadata])
+      .then(([firstPdfPage, permissions, { info }]) => {
         if (pdfDocument !== this.pdfDocument) {
           return; // The document was closed while the first page resolved.
         }
@@ -926,6 +927,7 @@ class PDFViewer {
             pageColors: this.pageColors,
             l10n: this.l10n,
             layerProperties: this._layerProperties,
+            language: info.Language,
           });
           this._pages.push(pageView);
         }
@@ -1014,15 +1016,12 @@ class PDFViewer {
         });
 
         this.eventBus.dispatch("pagesinit", { source: this });
-
-        pdfDocument.getMetadata().then(({ info }) => {
-          if (pdfDocument !== this.pdfDocument) {
-            return; // The document was closed while the metadata resolved.
-          }
-          if (info.Language) {
-            this.viewer.lang = info.Language;
-          }
-        });
+        if (pdfDocument !== this.pdfDocument) {
+          return; // The document was closed while the metadata resolved.
+        }
+        if (info.Language) {
+          this.viewer.lang = info.Language;
+        }
 
         if (this.defaultRenderingQueue) {
           this.update();

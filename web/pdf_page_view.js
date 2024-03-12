@@ -135,7 +135,7 @@ class PDFPageView {
   constructor(options) {
     const container = options.container;
     const defaultViewport = options.defaultViewport;
-
+    this.language = options.language;
     this.id = options.id;
     this.renderingId = "page" + this.id;
     this.#layerProperties = options.layerProperties || DEFAULT_LAYER_PROPERTIES;
@@ -889,6 +889,7 @@ class PDFPageView {
       this.textLayer = new TextLayerBuilder({
         highlighter: this._textHighlighter,
         accessibilityManager: this._accessibilityManager,
+        language: this.language,
         enablePermissions:
           this.#textLayerMode === TextLayerMode.ENABLE_PERMISSIONS,
       });
