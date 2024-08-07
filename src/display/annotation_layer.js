@@ -275,6 +275,7 @@ class AnnotationElement {
       container.tabIndex = DEFAULT_TAB_INDEX;
     }
     const { style } = container;
+    style.pointerEvents = "none";
 
     // The accessibility manager will move the annotation in the DOM in
     // order to match the visual ordering.
@@ -284,6 +285,7 @@ class AnnotationElement {
     style.zIndex = this.parent.zIndex++;
 
     if (data.popupRef) {
+      style.pointerEvents = "auto";
       container.setAttribute("aria-haspopup", "dialog");
     }
 
