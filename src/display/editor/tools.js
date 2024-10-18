@@ -605,7 +605,7 @@ class AnnotationEditorUIManager {
 
   #editorsToRescale = new Set();
 
-  #editorUndoBar = null;
+  _editorUndoBar = null;
 
   #enableHighlightFloatingButton = false;
 
@@ -852,7 +852,7 @@ class AnnotationEditorUIManager {
       rotation: 0,
     };
     this.isShiftKeyDown = false;
-    this.#editorUndoBar = editorUndoBar;
+    this._editorUndoBar = editorUndoBar;
 
     if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("TESTING")) {
       Object.defineProperty(this, "reset", {
@@ -2073,7 +2073,7 @@ class AnnotationEditorUIManager {
 
     const editors = [...this.#selectedEditors];
     const cmd = () => {
-      this.#editorUndoBar?.show(
+      this._editorUndoBar?.show(
         undo,
         editors.length === 1 ? editors[0].editorType : editors.length
       );
