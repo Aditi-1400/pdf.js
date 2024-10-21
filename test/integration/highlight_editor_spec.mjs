@@ -2276,7 +2276,7 @@ describe("Highlight Editor", () => {
           const newY = newRect.y + newRect.height / 2;
           await page.mouse.click(newX, newY, { count: 2, delay: 100 });
 
-          await page.waitForSelector(getEditorSelector(0));
+          await page.waitForSelector(getEditorSelector(1));
           await page.waitForSelector("#editorUndoBar", { hidden: true });
         })
       );
