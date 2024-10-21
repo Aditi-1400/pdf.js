@@ -2399,12 +2399,12 @@ describe("Highlight Editor", () => {
           const pdfData = fs.readFileSync(pdfPath).toString("base64");
           const dataTransfer = await page.evaluateHandle(pdfData => {
             const dataTransfer = new DataTransfer();
-            const view = Uint8Array.from(atob(pdfData), code => code.charCodeAt(0));
-            const file = new File(
-              [view],
-              "basicapi.pdf",
-              { type: "application/pdf" }
+            const view = Uint8Array.from(atob(pdfData), code =>
+              code.charCodeAt(0)
             );
+            const file = new File([view], "basicapi.pdf", {
+              type: "application/pdf",
+            });
             dataTransfer.items.add(file);
             return dataTransfer;
           }, pdfData);
