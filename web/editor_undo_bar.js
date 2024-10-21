@@ -13,6 +13,8 @@
  * limitations under the License.
  */
 
+import { AnnotationEditorType } from "../src/shared/util.js";
+
 class EditorUndoBar {
   #container;
 
@@ -44,6 +46,11 @@ class EditorUndoBar {
     eventBus._on("beforeprint", boundHide);
     eventBus._on("download", boundHide);
     eventBus._on("secondarytoolbaraction", boundHide);
+    eventBus._on("annotationeditormodechanged", ({ mode }) => {
+      if (mode === AnnotationEditorType.NONE) {
+        this.hide();
+      }
+    })
   }
 
   show(undoAction, messageData) {
