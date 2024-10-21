@@ -38,6 +38,10 @@ import {
   waitForSelectedEditor,
   waitForSerialized,
 } from "./test_utils.mjs";
+import { fileURLToPath } from "url";
+import fs from "fs";
+import path from "path";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const selectAll = async page => {
   await kbSelectAll(page);
@@ -2347,6 +2351,87 @@ describe("Highlight Editor", () => {
 
           await page.click("#secondaryToolbarToggleButton");
           await page.click("#lastPage");
+          await page.waitForSelector("#editorUndoBar", { hidden: true });
+        })
+      );
+    });
+
+    it("must check that the popup disappears when highlight mode is disabled", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await switchToHighlight(page);
+
+          const rect = await getSpanRectFromText(page, 1, "Abstract");
+          const x = rect.x + rect.width / 2;
+          const y = rect.y + rect.height / 2;
+          await page.mouse.click(x, y, { count: 2, delay: 100 });
+          await page.waitForSelector(getEditorSelector(0));
+          await waitForSerialized(page, 1);
+
+          await page.waitForSelector(`${getEditorSelector(0)} button.delete`);
+          await page.click(`${getEditorSelector(0)} button.delete`);
+          await waitForSerialized(page, 0);
+          await page.waitForSelector("#editorUndoBar:not([hidden])");
+
+          await switchToHighlight(page, /* disable */ true);
+          await page.waitForSelector("#editorUndoBar", { hidden: true });
+        })
+      );
+    });
+
+    it("must check that the popup disappears when a PDF is drag-and-dropped", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page]) => {
+          await switchToHighlight(page);
+
+          const rect = await getSpanRectFromText(page, 1, "Abstract");
+          const x = rect.x + rect.width / 2;
+          const y = rect.y + rect.height / 2;
+          await page.mouse.click(x, y, { count: 2, delay: 100 });
+          await page.waitForSelector(getEditorSelector(0));
+          await waitForSerialized(page, 1);
+
+          await page.waitForSelector(`${getEditorSelector(0)} button.delete`);
+          await page.click(`${getEditorSelector(0)} button.delete`);
+          await waitForSerialized(page, 0);
+          await page.waitForSelector("#editorUndoBar:not([hidden])");
+          const pdfPath = path.join(__dirname, "../pdfs/basicapi.pdf");
+          const pdfData = fs.readFileSync(pdfPath).toString("base64");
+          const dataTransfer = await page.evaluateHandle(pdfData => {
+            const dataTransfer = new DataTransfer();
+            const view = Uint8Array.from(atob(pdfData), code => code.charCodeAt(0));
+            const file = new File(
+              [view],
+              "basicapi.pdf",
+              { type: "application/pdf" }
+            );
+            dataTransfer.items.add(file);
+            return dataTransfer;
+          }, pdfData);
+
+          const dropSelector = "#viewer";
+          await page.evaluate(
+            (dataTransfer, dropSelector) => {
+              const dropTarget = document.querySelector(dropSelector);
+              const event = new DragEvent("dragstart", { dataTransfer });
+              dropTarget.dispatchEvent(event);
+            },
+            dataTransfer,
+            dropSelector
+          );
+
+          await page.evaluate(
+            (dataTransfer, dropSelector) => {
+              const dropTarget = document.querySelector(dropSelector);
+              const event = new DragEvent("drop", {
+                dataTransfer,
+                bubbles: true,
+              });
+              dropTarget.dispatchEvent(event);
+            },
+            dataTransfer,
+            dropSelector
+          );
           await page.waitForSelector("#editorUndoBar", { hidden: true });
         })
       );
