@@ -1,4 +1,12 @@
 [
+    {  "id": "wup-3",
+      "file": "pdfs/wup-3.pdf",
+      "md5": "1eb1b5360dd3fbc2545bbc830e42faa3",
+      "rounds": 1,
+      "type": "partial",
+      "viewport": { "width": 1200, "height": 1000 },
+      "detailArea": { "minX": 100, "minY": 200, "width": 600, "height": 500 }
+  },
   {
     "id": "bug1755201",
     "file": "pdfs/bug1755201.pdf",

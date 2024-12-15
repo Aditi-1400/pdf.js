@@ -912,7 +912,7 @@ class Driver {
 
             let textLayerCanvas, annotationLayerCanvas, annotationLayerContext;
             let initPromise;
-            if (task.type === "text" || task.type === "highlight") {
+            if (task.type === "text" || task.type === "highlight" || task.type == "partial") {
               // Using a dummy canvas for PDF context drawing operations
               textLayerCanvas = this.textLayerCanvas;
               if (!textLayerCanvas) {
@@ -1031,6 +1031,43 @@ class Driver {
                   ctx.globalCompositeOperation = "multiply";
                   ctx.drawImage(textLayerCanvas, 0, 0);
                   ctx.restore();
+                }
+                else if (task.type === "partial") {
+                  this._log(`Testing partial rendering for large page ${task.pageNum}...`);
+
+                  const outputScale = 4;
+                  const viewport = page.getViewport({
+                    scale: PixelsPerInch.PDF_TO_CSS_UNITS,
+                    width: task.viewport.width,
+                    height: task.viewport.height,
+                  });
+                  const area = task.detailArea || { x: 0, y: 0, width: viewport.width, height: viewport.height };
+                  console.log(area);
+                  const pixelWidth = Math.floor(area.width * outputScale);
+                  const pixelHeight = Math.floor(area.height * outputScale);
+                  task.outputScale = outputScale;
+                  this.canvas.width = pixelWidth;
+                  this.canvas.height = pixelHeight;
+
+                  const transform = [outputScale, 0, 0, outputScale, 0, 0];
+                  this._clearCanvas();
+      
+                  const renderContext = {
+                    canvasContext: ctx,
+                    transform,
+                    viewport,
+                    pageColors: null,
+                    annotationCanvasMap: null,
+                  };
+                
+                  page.render(renderContext).promise
+                    .then(() => {
+                      this._snapshot(task, null);
+                    })
+                    .catch(err => {
+                      this._snapshot(task, `renderPartial: ${err.message}`);
+                    });
+                  return;
                 }
               }
               // If we have annotation layer, compose it on top of the page.
