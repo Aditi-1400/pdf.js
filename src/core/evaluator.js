@@ -1517,7 +1517,11 @@ class PartialEvaluator {
     localShadingPatternCache.set(shading, id);
 
     if (this.parsingType3Font) {
-      this.handler.send("commonobj", [id, "Pattern", patternIR]);
+      const transfers = [];
+      if (patternIR[0] === "Mesh") {
+        transfers.push(patternIR[2].buffer, patternIR[3].buffer);
+      }
+      this.handler.send("commonobj", [id, "Pattern", patternIR], transfers);
     } else {
       this.handler.send("obj", [id, this.pageIndex, "Pattern", patternIR]);
     }
