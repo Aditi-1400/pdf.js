@@ -39,6 +39,8 @@ class RendererMessageHandler {
     ownerDocument: globalThis,
   });
 
+  static #pdfWorkerHandlers = new Map();
+
   static {
     // Worker thread (and not Node.js)?
     if (
@@ -149,7 +151,7 @@ class RendererMessageHandler {
         imageData?.bitmap?.close();
         return;
       }
-      objectHandler.resolveObject(id, pageIndex, type, imageData);
+        objectHandler.resolveObject(id, pageIndex, type, imageData);
     });
   }
 
@@ -312,6 +314,26 @@ class RendererMessageHandler {
     handler.on("ResetCanvas", ({ renderTaskId }) => {
       this.#cleanupRenderTask(renderTaskId);
     });
+
+    handler.on("SetupWorkerChannel", data => this.setupWorkerChannel(data));
+  }
+
+  static setupWorkerChannel({ docId = null, port = null } = {}) {
+    if (!port) {
+      throw new Error("SetupWorkerChannel - expected a MessagePort.");
+    }
+
+    const bridgeId = docId || "default";
+    const sourceName = `renderer_worker_${bridgeId}`;
+    const targetName = `pdf_worker_${bridgeId}`;
+
+    this.#pdfWorkerHandlers.get(bridgeId)?.destroy();
+
+    const pdfWorkerHandler = new MessageHandler(sourceName, targetName, port);
+    this.#pdfWorkerHandlers.set(bridgeId, pdfWorkerHandler);
+
+    pdfWorkerHandler.send("ready", null);
+    return { ok: true, docId: bridgeId };
   }
 }
 

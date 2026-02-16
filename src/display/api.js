@@ -531,7 +531,21 @@ function getDocument(src = {}) {
           // through the transport once destroy resumes.
           throw new Error("Loading aborted");
         }
-        messageHandler.send("Ready", null);
+
+        const setupRenderer = task._rendererWorker
+          ? task._rendererWorker
+              .setupMessageChannels(messageHandler, docId)
+              .catch(reason => {
+                warn(
+                  "Unable to connect renderer worker with the PDF worker: " +
+                    reason.message
+                );
+              })
+          : Promise.resolve();
+
+        return setupRenderer.finally(() => {
+          messageHandler.send("Ready", null);
+        });
       });
     })
     .catch(task._capability.reject)
@@ -2196,6 +2210,38 @@ class RendererWorker {
   #resolve() {
     this.#capability.resolve();
   }
+
+  async setupMessageChannels(workerHandler, docId) {
+    await this.promise;
+    if (this.destroyed) {
+      throw new Error("Renderer worker was destroyed");
+    }
+    if (typeof MessageChannel === "undefined") {
+      throw new Error("Renderer worker requires MessageChannel support.");
+    }
+
+    const { port1, port2 } = new MessageChannel();
+    const bridgeDocId = docId || "default";
+
+    const bindRendererPromise = this.#rendererHandler.sendWithPromise(
+      "SetupWorkerChannel",
+      {
+        docId: bridgeDocId,
+        port: port1,
+      },
+      [port1]
+    );
+    const bindPdfWorkerPromise = workerHandler.sendWithPromise(
+      "SetupRendererChannel",
+      {
+        docId: bridgeDocId,
+        port: port2,
+      },
+      [port2]
+    );
+    await Promise.all([bindRendererPromise, bindPdfWorkerPromise]);
+  }
+
 
   #initialize() {
     if (typeof Worker === "undefined") {
