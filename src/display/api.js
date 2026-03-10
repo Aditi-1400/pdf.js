@@ -2242,7 +2242,6 @@ class RendererWorker {
     await Promise.all([bindRendererPromise, bindPdfWorkerPromise]);
   }
 
-
   #initialize() {
     if (typeof Worker === "undefined") {
       this.#capability.reject(
@@ -2923,7 +2922,7 @@ class WorkerTransport {
   }
 
   setupMessageHandler() {
-    const { messageHandler, loadingTask, rendererHandler } = this;
+    const { messageHandler, loadingTask } = this;
 
     messageHandler.on("GetReader", (data, sink) => {
       assert(
@@ -3099,32 +3098,10 @@ class WorkerTransport {
       pdfBug: this._params.pdfBug,
     });
 
-    // TODO: add a direct channel between the renderer worker and the core
-    // worker so these main-thread forwarders can be removed.
-    rendererHandler?.on("FontFallback", data => {
-      if (this.destroyed) {
-        return null;
-      }
-      return messageHandler.sendWithPromise("FontFallback", data);
-    });
-
-    const forwardToRenderer = (action, data) => {
-      if (!rendererHandler) {
-        return;
-      }
-      try {
-        rendererHandler.send(action, data);
-      } catch {
-        // Ignore errors if the renderer worker has been destroyed.
-      }
-    };
-
     messageHandler.on("commonobj", ([id, type, exportedData]) => {
       if (this.destroyed) {
         return null; // Ignore any pending requests if the worker was terminated.
       }
-
-      forwardToRenderer("commonobj", [id, type, exportedData]);
 
       if (this.commonObjs.has(id)) {
         return null;
@@ -3138,7 +3115,6 @@ class WorkerTransport {
         // Ignore any pending requests if the worker was terminated.
         return;
       }
-      forwardToRenderer("obj", [id, pageIndex, type, imageData]);
       objectHandler.resolveObject(id, pageIndex, type, imageData);
     });
 

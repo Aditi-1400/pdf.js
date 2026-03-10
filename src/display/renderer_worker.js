@@ -31,6 +31,8 @@ class RendererMessageHandler {
 
   static #renderTaskStates = new Map();
 
+  static #pendingOperatorLists = new Map(); // Queue for operator lists arriving before render task init
+
   static #canvasMap = new Map();
 
   static #cleanedPages = new Set();
@@ -71,12 +73,16 @@ class RendererMessageHandler {
   }
 
   static #cleanupRenderTask(renderTaskId) {
+    // Clean up any pending operator lists for this render task
+    this.#pendingOperatorLists.delete(renderTaskId);
+
     const renderTaskState = this.#renderTaskStates.get(renderTaskId);
     if (!renderTaskState) {
       return;
     }
     renderTaskState.aborted = true;
-    renderTaskState.continueResolve?.();
+    renderTaskState.waitCapability?.resolve();
+    renderTaskState.waitCapability = null;
 
     renderTaskState.gfx.endDrawing();
     this.#renderTaskStates.delete(renderTaskId);
@@ -106,25 +112,59 @@ class RendererMessageHandler {
 
   static async #executeOperatorList(renderTaskState, operationsFilter) {
     const { operatorList, gfx } = renderTaskState;
-    while (!renderTaskState.aborted) {
-      const continuePromise = new Promise(resolve => {
-        renderTaskState.continueResolve = resolve;
-      });
+    // TODO(Aditi): Check FontFallback
+    renderTaskState.running = true;
+    try {
+      while (!renderTaskState.aborted) {
+        const waitCapability = Promise.withResolvers();
+        renderTaskState.waitCapability = waitCapability;
+        let continueCalled = false;
 
-      renderTaskState.operatorListIdx = gfx.executeOperatorList(
-        operatorList,
-        renderTaskState.operatorListIdx,
-        renderTaskState.continueResolve,
-        undefined, // Renderer does not support stepper yet.
-        operationsFilter
-      );
+        const continueCallback = () => {
+          if (!continueCalled) {
+            continueCalled = true;
+            waitCapability.resolve();
+          }
+        };
 
-      if (renderTaskState.operatorListIdx === operatorList.argsArray.length) {
-        return renderTaskState.operatorListIdx;
+        renderTaskState.operatorListIdx = gfx.executeOperatorList(
+          operatorList,
+          renderTaskState.operatorListIdx,
+          continueCallback,
+          undefined,
+          typeof operationsFilter === "function" ? operationsFilter : null
+        );
+        renderTaskState.waitCapability = null;
+
+        if (renderTaskState.operatorListIdx === operatorList.argsArray.length) {
+          // Processed all available operations
+          if (operatorList.lastChunk) {
+            // All done
+            return renderTaskState.operatorListIdx;
+          }
+          // More chunks may arrive, exit loop and wait to be re-triggered
+          return renderTaskState.operatorListIdx;
+        }
+        await waitCapability.promise;
       }
-      await continuePromise;
+      return renderTaskState.operatorListIdx;
+    } finally {
+      renderTaskState.running = false;
     }
-    return renderTaskState.operatorListIdx;
+  }
+
+  static #operatorListChanged(renderTaskState) {
+    if (renderTaskState.running || renderTaskState.aborted) {
+      // Already executing, loop will pick up new operations
+      return;
+    }
+    // Start execution in background, track the promise
+    renderTaskState.executionPromise = this.#executeOperatorList(
+      renderTaskState,
+      null
+    ).finally(() => {
+      renderTaskState.executionPromise = null;
+    });
   }
 
   static #setupObjectHandler(handler) {
@@ -151,7 +191,7 @@ class RendererMessageHandler {
         imageData?.bitmap?.close();
         return;
       }
-        objectHandler.resolveObject(id, pageIndex, type, imageData);
+      objectHandler.resolveObject(id, pageIndex, type, imageData);
     });
   }
 
@@ -235,7 +275,6 @@ class RendererMessageHandler {
         annotationCanvases
         /** Renderer worker doesn't support pageColors and dependencyTracker */
       );
-
       gfx.beginDrawing({
         transform,
         viewport,
@@ -256,9 +295,31 @@ class RendererMessageHandler {
           lastChunk: false,
         },
         operatorListIdx: 0,
-        continueResolve: null,
+        waitCapability: null,
         aborted: false,
+        running: false,
+        executionPromise: null,
       });
+
+      // Process any chunks that arrived before InitializeGraphics
+      const pendingChunks = this.#pendingOperatorLists.get(renderTaskId);
+      if (pendingChunks) {
+        const renderTaskState = this.#renderTaskStates.get(renderTaskId);
+        for (const chunk of pendingChunks) {
+          this.#appendOperatorList(
+            renderTaskState,
+            chunk.fnArray,
+            chunk.argsArray,
+            chunk.lastChunk
+          );
+          if (chunk.separateAnnots !== null) {
+            renderTaskState.operatorList.separateAnnots = chunk.separateAnnots;
+          }
+        }
+        this.#pendingOperatorLists.delete(renderTaskId);
+        // Trigger execution (like operatorListChanged on main thread)
+        this.#operatorListChanged(renderTaskState);
+      }
     });
 
     handler.on("UpdateAnnotationCanvases", data => {
@@ -295,13 +356,45 @@ class RendererMessageHandler {
         return operatorListIdx;
       }
 
-      renderTaskState.operatorListIdx = operatorListIdx;
-      this.#appendOperatorList(renderTaskState, fnArray, argsArray, lastChunk);
+      // Only append if we don't already have this data from direct streaming.
+      // If direct streaming is active, the operator list will already be
+      // populated.
+      const currentLength = renderTaskState.operatorList.argsArray.length;
+      const expectedLength = operatorListIdx + (fnArray?.length || 0);
+      if (fnArray && currentLength < expectedLength) {
+        this.#appendOperatorList(
+          renderTaskState,
+          fnArray,
+          argsArray,
+          lastChunk
+        );
+        // Trigger execution for new data from main thread fallback path
+        this.#operatorListChanged(renderTaskState);
+      } else if (lastChunk) {
+        renderTaskState.operatorList.lastChunk = true;
+      }
 
-      const currentOperatorListIdx = await this.#executeOperatorList(
-        renderTaskState,
-        operationsFilter
-      );
+      // Wait for any ongoing execution to complete
+      if (renderTaskState.executionPromise) {
+        await renderTaskState.executionPromise;
+      }
+
+      // If execution was triggered, wait for it; otherwise trigger now
+      if (
+        !renderTaskState.running &&
+        renderTaskState.operatorListIdx <
+          renderTaskState.operatorList.argsArray.length
+      ) {
+        renderTaskState.executionPromise = this.#executeOperatorList(
+          renderTaskState,
+          operationsFilter
+        ).finally(() => {
+          renderTaskState.executionPromise = null;
+        });
+        await renderTaskState.executionPromise;
+      }
+
+      const currentOperatorListIdx = renderTaskState.operatorListIdx;
       if (
         renderTaskState.operatorList.lastChunk &&
         currentOperatorListIdx === renderTaskState.operatorList.argsArray.length
@@ -331,6 +424,43 @@ class RendererMessageHandler {
 
     const pdfWorkerHandler = new MessageHandler(sourceName, targetName, port);
     this.#pdfWorkerHandlers.set(bridgeId, pdfWorkerHandler);
+
+    // Object handling forwarded from main thread - now handled by PDF worker
+    // transferring to worker directly.
+    this.#setupObjectHandler(pdfWorkerHandler);
+
+    // Handle operator list chunks sent directly from PDF worker
+    // (same streaming behavior as main thread)
+    pdfWorkerHandler.on("RenderPageChunk", data => {
+      const { pageIndex, fnArray, argsArray, lastChunk, separateAnnots } = data;
+      const renderTaskId = pageIndex;
+
+      const renderTaskState = this.#renderTaskStates.get(renderTaskId);
+      if (!renderTaskState) {
+        // Render task not yet initialized - queue chunk for later
+        let queue = this.#pendingOperatorLists.get(renderTaskId);
+        if (!queue) {
+          queue = [];
+          this.#pendingOperatorLists.set(renderTaskId, queue);
+        }
+        queue.push({ fnArray, argsArray, lastChunk, separateAnnots });
+        return;
+      }
+
+      // Append chunk to operator list (like _renderPageChunk on main thread)
+      this.#appendOperatorList(renderTaskState, fnArray, argsArray, lastChunk);
+      if (separateAnnots !== null) {
+        renderTaskState.operatorList.separateAnnots = separateAnnots;
+      }
+
+      // Trigger execution (like operatorListChanged on main thread)
+      this.#operatorListChanged(renderTaskState);
+    });
+
+    // MessageHandler uses addEventListener, so we must call start() on
+    // MessagePort. Call start() AFTER registering handlers to ensure all
+    // handlers are in place before messages can be delivered.
+    port.start();
 
     pdfWorkerHandler.send("ready", null);
     return { ok: true, docId: bridgeId };

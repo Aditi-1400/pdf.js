@@ -232,6 +232,7 @@ class PartialEvaluator {
   constructor({
     xref,
     handler,
+    rendererHandler = null,
     pageIndex,
     idFactory,
     fontCache,
@@ -244,6 +245,7 @@ class PartialEvaluator {
   }) {
     this.xref = xref;
     this.handler = handler;
+    this.rendererHandler = rendererHandler;
     this.pageIndex = pageIndex;
     this.idFactory = idFactory;
     this.fontCache = fontCache;
@@ -821,20 +823,31 @@ class PartialEvaluator {
     ) {
       assert(Number.isInteger(imgData.dataLen), "Expected dataLen to be set.");
     }
-    const transfers = imgData ? [imgData.bitmap || imgData.data.buffer] : null;
 
-    if (this.parsingType3Font || cacheGlobally) {
-      return this.handler.send(
-        "commonobj",
-        [objId, "Image", imgData],
-        transfers
+    const action = this.parsingType3Font || cacheGlobally ? "commonobj" : "obj";
+
+    const buildArgs = data =>
+      action === "commonobj"
+        ? [objId, "Image", data]
+        : [objId, this.pageIndex, "Image", data];
+
+    const getTransfers = data => {
+      if (!data) {
+        return null;
+      }
+      const transferable = data.bitmap || data.data?.buffer;
+      return transferable ? [transferable] : null;
+    };
+
+    if (this.rendererHandler) {
+      const clonedData = imgData ? structuredClone(imgData) : imgData;
+      this.rendererHandler.send(
+        action,
+        buildArgs(clonedData),
+        getTransfers(clonedData)
       );
     }
-    return this.handler.send(
-      "obj",
-      [objId, this.pageIndex, "Image", imgData],
-      transfers
-    );
+    this.handler.send(action, buildArgs(imgData), getTransfers(imgData));
   }
 
   async buildPaintImageXObject({
@@ -1300,7 +1313,7 @@ class PartialEvaluator {
     }
 
     state.font = translated.font;
-    translated.send(this.handler);
+    translated.send(this.handler, this.rendererHandler);
     return translated.loadedName;
   }
 
@@ -1322,7 +1335,8 @@ class PartialEvaluator {
           font,
           glyphs,
           this.handler,
-          this.options
+          this.options,
+          this.rendererHandler
         );
       }
     }
@@ -1799,8 +1813,25 @@ class PartialEvaluator {
 
     if (this.parsingType3Font) {
       const buffer = compilePatternInfo(patternIR);
+      if (this.rendererHandler) {
+        const clonedBuffer = buffer.slice(0);
+        this.rendererHandler.send(
+          "commonobj",
+          [id, "Pattern", clonedBuffer],
+          [clonedBuffer]
+        );
+      }
       this.handler.send("commonobj", [id, "Pattern", buffer], [buffer]);
     } else {
+      if (this.rendererHandler) {
+        const clonedIR = structuredClone(patternIR);
+        this.rendererHandler.send("obj", [
+          id,
+          this.pageIndex,
+          "Pattern",
+          clonedIR,
+        ]);
+      }
       this.handler.send("obj", [id, this.pageIndex, "Pattern", patternIR]);
     }
     return id;
@@ -1869,6 +1900,8 @@ class PartialEvaluator {
             localShadingPatternCache,
           });
           if (objId) {
+            // Ensure that the Pattern is resolved before it's used.
+            operatorList.addDependency(objId);
             const matrix = lookupMatrix(dict.getArray("Matrix"), null);
             operatorList.addOp(fn, ["Shading", objId, matrix]);
           }
@@ -2423,6 +2456,8 @@ class PartialEvaluator {
             if (!patternId) {
               continue;
             }
+            // Ensure that the Pattern is resolved before it's used.
+            operatorList.addDependency(patternId);
             args = [patternId];
             fn = OPS.shadingFill;
             break;
@@ -5042,7 +5077,13 @@ class PartialEvaluator {
     return new Font(fontName.name, fontFile, newProperties, this.options);
   }
 
-  static buildFontPaths(font, glyphs, handler, evaluatorOptions) {
+  static buildFontPaths(
+    font,
+    glyphs,
+    handler,
+    evaluatorOptions,
+    rendererHandler = null
+  ) {
     function buildPath(fontChar) {
       const glyphName = `${font.loadedName}_path_${fontChar}`;
       try {
@@ -5050,6 +5091,14 @@ class PartialEvaluator {
           return;
         }
         const buffer = compileFontPathInfo(font.renderer.getPathJs(fontChar));
+        if (rendererHandler) {
+          const clonedBuffer = buffer.slice(0);
+          rendererHandler.send(
+            "commonobj",
+            [glyphName, "FontPath", clonedBuffer],
+            [clonedBuffer]
+          );
+        }
         handler.send("commonobj", [glyphName, "FontPath", buffer], [buffer]);
       } catch (reason) {
         if (evaluatorOptions.ignoreErrors) {
@@ -5095,7 +5144,7 @@ class TranslatedFont {
     this.type3Dependencies = font.isType3Font ? new Set() : null;
   }
 
-  send(handler) {
+  send(handler, rendererHandler = null) {
     if (this.#sent) {
       return;
     }
@@ -5104,6 +5153,17 @@ class TranslatedFont {
     const fontData = this.font.exportData(),
       transfers = fontData.buffer ? [fontData.buffer] : null;
 
+    if (rendererHandler) {
+      const clonedFontData = structuredClone(fontData);
+      const clonedTransfers = clonedFontData.buffer
+        ? [clonedFontData.buffer]
+        : null;
+      rendererHandler.send(
+        "commonobj",
+        [this.loadedName, "Font", clonedFontData],
+        clonedTransfers
+      );
+    }
     handler.send("commonobj", [this.loadedName, "Font", fontData], transfers);
     // future path: switch to a SharedArrayBuffer
     // const sab = new SharedArrayBuffer(data.byteLength);
@@ -5112,7 +5172,7 @@ class TranslatedFont {
     // handler.send("commonobj", [this.loadedName, "Font", sab]);
   }
 
-  fallback(handler, evaluatorOptions) {
+  fallback(handler, evaluatorOptions, rendererHandler = null) {
     if (!this.font.data) {
       return;
     }
@@ -5128,7 +5188,8 @@ class TranslatedFont {
       this.font,
       /* glyphs = */ this.font.glyphCacheValues,
       handler,
-      evaluatorOptions
+      evaluatorOptions,
+      rendererHandler
     );
   }
 

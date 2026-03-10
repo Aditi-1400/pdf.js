@@ -176,6 +176,12 @@ class WorkerMessageHandler {
       rendererWorkerHandler = rendererHandler;
 
       rendererWorkerHandler.on("ready", () => {});
+
+      // Handle FontFallback requests from the renderer worker directly
+      rendererWorkerHandler.on("FontFallback", function (data) {
+        return pdfManager.fontFallback(data.id, handler, rendererWorkerHandler);
+      });
+
       return { ok: true, docId: bridgeId };
     }
 
@@ -205,7 +211,11 @@ class WorkerMessageHandler {
         const task = new WorkerTask("loadXfaResources");
         startWorkerTask(task);
 
-        await pdfManager.ensureDoc("loadXfaResources", [handler, task]);
+        await pdfManager.ensureDoc("loadXfaResources", [
+          handler,
+          task,
+          rendererWorkerHandler,
+        ]);
         finishWorkerTask(task);
       }
 
@@ -512,7 +522,8 @@ class WorkerMessageHandler {
                     task,
                     types,
                     annotationPromises,
-                    annotationGlobals
+                    annotationGlobals,
+                    rendererWorkerHandler
                   ) || []
                 );
               })
@@ -562,16 +573,18 @@ class WorkerMessageHandler {
         const task = new WorkerTask(`GetAnnotations: page ${pageIndex}`);
         startWorkerTask(task);
 
-        return page.getAnnotationsData(handler, task, intent).then(
-          data => {
-            finishWorkerTask(task);
-            return data;
-          },
-          reason => {
-            finishWorkerTask(task);
-            throw reason;
-          }
-        );
+        return page
+          .getAnnotationsData(handler, task, intent, rendererWorkerHandler)
+          .then(
+            data => {
+              finishWorkerTask(task);
+              return data;
+            },
+            reason => {
+              finishWorkerTask(task);
+              throw reason;
+            }
+          );
       });
     });
 
@@ -761,7 +774,8 @@ class WorkerMessageHandler {
                     task,
                     annotations,
                     imagePromises,
-                    changes
+                    changes,
+                    rendererWorkerHandler
                   )
                   .finally(function () {
                     finishWorkerTask(task);
@@ -807,7 +821,13 @@ class WorkerMessageHandler {
                 startWorkerTask(task);
 
                 return page
-                  .save(handler, task, annotationStorage, changes)
+                  .save(
+                    handler,
+                    task,
+                    annotationStorage,
+                    changes,
+                    rendererWorkerHandler
+                  )
                   .finally(function () {
                     finishWorkerTask(task);
                   });
@@ -913,6 +933,7 @@ class WorkerMessageHandler {
             task,
             intent: data.intent,
             cacheKey: data.cacheKey,
+            rendererHandler: rendererWorkerHandler,
             annotationStorage: data.annotationStorage,
             modifiedIds: data.modifiedIds,
             pageIndex,
@@ -958,6 +979,7 @@ class WorkerMessageHandler {
           .extractTextContent({
             handler,
             task,
+            rendererHandler: rendererWorkerHandler,
             sink,
             includeMarkedContent,
             disableNormalization,
@@ -995,7 +1017,7 @@ class WorkerMessageHandler {
     });
 
     handler.on("FontFallback", function (data) {
-      return pdfManager.fontFallback(data.id, handler);
+      return pdfManager.fontFallback(data.id, handler, rendererWorkerHandler);
     });
 
     if (

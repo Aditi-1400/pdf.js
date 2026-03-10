@@ -658,8 +658,10 @@ class OperatorList {
 
   static isOffscreenCanvasSupported = false;
 
-  constructor(intent = 0, streamSink) {
+  constructor(intent = 0, streamSink, rendererHandler = null, pageIndex = -1) {
     this._streamSink = streamSink;
+    this._rendererHandler = rendererHandler;
+    this._pageIndex = pageIndex;
     this.fnArray = [];
     this.argsArray = [];
     this.optimizer =
@@ -805,17 +807,28 @@ class OperatorList {
     const length = this.length;
     this._totalLength += length;
 
-    this._streamSink.enqueue(
-      {
-        fnArray: this.fnArray,
-        argsArray: this.argsArray,
+    // Send chunk directly to renderer worker FIRST (before main thread transfer
+    // detaches ArrayBuffers). Use slice() for shallow copy of arrays.
+    if (this._rendererHandler && length > 0) {
+      this._rendererHandler.send("RenderPageChunk", {
+        pageIndex: this._pageIndex,
+        fnArray: this.fnArray.slice(),
+        argsArray: this.argsArray.slice(),
         lastChunk,
         separateAnnots,
-        length,
-      },
-      1,
-      this._transfers
-    );
+      });
+    }
+
+    const chunk = {
+      fnArray: this.fnArray,
+      argsArray: this.argsArray,
+      lastChunk,
+      separateAnnots,
+      length,
+    };
+
+    // Send to main thread via stream sink; may transfer/detach ArrayBuffers.
+    this._streamSink.enqueue(chunk, 1, this._transfers);
 
     this.dependencies.clear();
     this.fnArray.length = 0;

@@ -130,13 +130,18 @@ class Page {
     };
   }
 
-  #createPartialEvaluator(handler, pageIndex = this.pageIndex) {
+  #createPartialEvaluator(
+    handler,
+    rendererHandler = null,
+    pageIndex = this.pageIndex
+  ) {
     // The pageIndex is used to identify the page some objects (like images)
     // belong to.
 
     return new PartialEvaluator({
       xref: this.xref,
       handler,
+      rendererHandler,
       pageIndex,
       idFactory: this._localIdFactory,
       fontCache: this.fontCache,
@@ -368,11 +373,21 @@ class Page {
     await Promise.all(promises);
   }
 
-  async saveNewAnnotations(handler, task, annotations, imagePromises, changes) {
+  async saveNewAnnotations(
+    handler,
+    task,
+    annotations,
+    imagePromises,
+    changes,
+    rendererHandler = null
+  ) {
     if (this.xfaFactory) {
       throw new Error("XFA: Cannot save new annotations.");
     }
-    const partialEvaluator = this.#createPartialEvaluator(handler);
+    const partialEvaluator = this.#createPartialEvaluator(
+      handler,
+      rendererHandler
+    );
 
     const deletedAnnotations = new RefSetCache();
     const existingAnnotations = new RefSet();
@@ -415,8 +430,17 @@ class Page {
     }
   }
 
-  async save(handler, task, annotationStorage, changes) {
-    const partialEvaluator = this.#createPartialEvaluator(handler);
+  async save(
+    handler,
+    task,
+    annotationStorage,
+    changes,
+    rendererHandler = null
+  ) {
+    const partialEvaluator = this.#createPartialEvaluator(
+      handler,
+      rendererHandler
+    );
 
     // Fetch the page's annotations and save the content
     // in case of interactive form fields.
@@ -473,6 +497,7 @@ class Page {
     task,
     intent,
     cacheKey,
+    rendererHandler = null,
     pageIndex = this.pageIndex,
     annotationStorage = null,
     modifiedIds = null,
@@ -480,7 +505,11 @@ class Page {
     const contentStreamPromise = this.getContentStream();
     const resourcesPromise = this.loadResources(RESOURCES_KEYS_OPERATOR_LIST);
 
-    const partialEvaluator = this.#createPartialEvaluator(handler, pageIndex);
+    const partialEvaluator = this.#createPartialEvaluator(
+      handler,
+      rendererHandler,
+      pageIndex
+    );
 
     const newAnnotsByPage = !this.xfaFactory
       ? getNewAnnotationsMap(annotationStorage)
@@ -581,7 +610,7 @@ class Page {
         }
       }
 
-      const opList = new OperatorList(intent, sink);
+      const opList = new OperatorList(intent, sink, rendererHandler, pageIndex);
       handler.send("StartRenderPage", {
         transparency: partialEvaluator.hasBlendModes(
           resources,
@@ -693,6 +722,7 @@ class Page {
   async extractTextContent({
     handler,
     task,
+    rendererHandler = null,
     includeMarkedContent,
     disableNormalization,
     sink,
@@ -712,7 +742,10 @@ class Page {
       RESOURCES_KEYS_TEXT_CONTENT
     );
 
-    const partialEvaluator = this.#createPartialEvaluator(handler);
+    const partialEvaluator = this.#createPartialEvaluator(
+      handler,
+      rendererHandler
+    );
 
     return partialEvaluator.getTextContent({
       stream: contentStream,
@@ -759,7 +792,7 @@ class Page {
     return tree;
   }
 
-  async getAnnotationsData(handler, task, intent) {
+  async getAnnotationsData(handler, task, intent, rendererHandler = null) {
     const annotations = await this._parsedAnnotations;
     if (annotations.length === 0) {
       return annotations;
@@ -784,7 +817,10 @@ class Page {
       }
 
       if (annotation.hasTextContent && isVisible) {
-        partialEvaluator ??= this.#createPartialEvaluator(handler);
+        partialEvaluator ??= this.#createPartialEvaluator(
+          handler,
+          rendererHandler
+        );
 
         textContentPromises.push(
           annotation
@@ -811,6 +847,7 @@ class Page {
         this.extractTextContent({
           handler,
           task,
+          rendererHandler,
           includeMarkedContent: false,
           disableNormalization: false,
           sink: null,
@@ -913,7 +950,8 @@ class Page {
     task,
     types,
     promises,
-    annotationGlobals
+    annotationGlobals,
+    rendererHandler = null
   ) {
     const { pageIndex } = this;
 
@@ -949,7 +987,10 @@ class Page {
             }
             annotation.data.pageIndex = pageIndex;
             if (annotation.hasTextContent && annotation.viewable) {
-              partialEvaluator ??= this.#createPartialEvaluator(handler);
+              partialEvaluator ??= this.#createPartialEvaluator(
+                handler,
+                rendererHandler
+              );
 
               await annotation.extractTextContent(partialEvaluator, task, [
                 -Infinity,
@@ -1344,7 +1385,7 @@ class PDFDocument {
     this.xfaFactory.setImages(xfaImages);
   }
 
-  async #loadXfaFonts(handler, task) {
+  async #loadXfaFonts(handler, task, rendererHandler = null) {
     const acroForm = await this.pdfManager.ensureCatalog("acroForm");
     if (!acroForm) {
       return;
@@ -1370,6 +1411,7 @@ class PDFDocument {
     const partialEvaluator = new PartialEvaluator({
       xref: this.xref,
       handler,
+      rendererHandler,
       pageIndex: -1,
       idFactory: this._globalIdFactory,
       fontCache,
@@ -1482,9 +1524,9 @@ class PDFDocument {
     this.xfaFactory.appendFonts(pdfFonts, reallyMissingFonts);
   }
 
-  loadXfaResources(handler, task) {
+  loadXfaResources(handler, task, rendererHandler = null) {
     return Promise.all([
-      this.#loadXfaFonts(handler, task).catch(() => {
+      this.#loadXfaFonts(handler, task, rendererHandler).catch(() => {
         // Ignore errors, to allow the document to load.
       }),
       this.#loadXfaImages(),
@@ -1850,12 +1892,16 @@ class PDFDocument {
     }
   }
 
-  async fontFallback(id, handler) {
+  async fontFallback(id, handler, rendererHandler = null) {
     const { catalog, pdfManager } = this;
 
     for (const translatedFont of await Promise.all(catalog.fontCache)) {
       if (translatedFont.loadedName === id) {
-        translatedFont.fallback(handler, pdfManager.evaluatorOptions);
+        translatedFont.fallback(
+          handler,
+          pdfManager.evaluatorOptions,
+          rendererHandler
+        );
         return;
       }
     }
