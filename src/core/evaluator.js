@@ -397,6 +397,244 @@ class PartialEvaluator {
     return false;
   }
 
+  _hasTransferMaps(transferObj) {
+    let transferArray;
+    if (Array.isArray(transferObj)) {
+      transferArray = transferObj;
+    } else if (isPDFFunction(transferObj)) {
+      transferArray = [transferObj];
+    } else {
+      return false;
+    }
+
+    const numFns = transferArray.length;
+    if (!(numFns === 1 || numFns === 4)) {
+      return false;
+    }
+
+    let numEffectfulFns = 0;
+    for (const entry of transferArray) {
+      const transfer = this.xref.fetchIfRef(entry);
+      if (isName(transfer, "Identity")) {
+        continue;
+      }
+      if (!isPDFFunction(transfer)) {
+        return false;
+      }
+      numEffectfulFns++;
+    }
+    return numEffectfulFns > 0;
+  }
+
+  _hasCanvasFiltersInGState(graphicState) {
+    if (this._hasTransferMaps(graphicState.get("TR"))) {
+      return true;
+    }
+
+    const smask = graphicState.get("SMask");
+    if (!(smask instanceof Dict)) {
+      return false;
+    }
+    const subtype = smask.get("S");
+    return (
+      isName(subtype, "Luminosity") ||
+      (isName(subtype, "Alpha") && isPDFFunction(smask.get("TR")))
+    );
+  }
+
+  hasCanvasFilters(resources) {
+    if (!(resources instanceof Dict)) {
+      return false;
+    }
+
+    const processed = new RefSet();
+    if (resources.objId) {
+      processed.put(resources.objId);
+    }
+    const xref = this.xref;
+    const nodes = [resources];
+    while (nodes.length) {
+      const node = nodes.shift();
+
+      const graphicStates = node.get("ExtGState");
+      if (graphicStates instanceof Dict) {
+        for (let graphicState of graphicStates.getRawValues()) {
+          if (graphicState instanceof Ref) {
+            if (processed.has(graphicState)) {
+              continue;
+            }
+            try {
+              graphicState = xref.fetch(graphicState);
+            } catch (ex) {
+              info(`hasCanvasFilters - failed to fetch ExtGState: "${ex}".`);
+              // A fetch failure means we can't inspect the resource, so fall
+              // back to main-thread rendering rather than misclassify a corrupt
+              // PDF as filter-free.
+              return true;
+            }
+          }
+          if (!(graphicState instanceof Dict)) {
+            continue;
+          }
+          if (graphicState.objId) {
+            processed.put(graphicState.objId);
+          }
+          try {
+            if (this._hasCanvasFiltersInGState(graphicState)) {
+              return true;
+            }
+            // Canvas filters can also be present in the Resources of the
+            // transparency group used by a soft-mask (SMask) dictionary.
+            const smask = graphicState.get("SMask");
+            const smaskGroup = smask instanceof Dict ? smask.get("G") : null;
+            const smaskResources =
+              smaskGroup instanceof BaseStream
+                ? smaskGroup.dict.get("Resources")
+                : null;
+            if (
+              smaskResources instanceof Dict &&
+              (!smaskResources.objId || !processed.has(smaskResources.objId))
+            ) {
+              nodes.push(smaskResources);
+              if (smaskResources.objId) {
+                processed.put(smaskResources.objId);
+              }
+            }
+          } catch (ex) {
+            info(`hasCanvasFilters - failed to inspect filter data: "${ex}".`);
+            return true;
+          }
+        }
+      }
+
+      const xObjects = node.get("XObject");
+      if (xObjects instanceof Dict) {
+        for (let xObject of xObjects.getRawValues()) {
+          if (xObject instanceof Ref) {
+            if (processed.has(xObject)) {
+              continue;
+            }
+            try {
+              xObject = xref.fetch(xObject);
+            } catch (ex) {
+              info(`hasCanvasFilters - failed to fetch XObject: "${ex}".`);
+              return true;
+            }
+          }
+          if (!(xObject instanceof BaseStream)) {
+            continue;
+          }
+          if (xObject.dict.objId) {
+            processed.put(xObject.dict.objId);
+          }
+          const xResources = xObject.dict.get("Resources");
+          if (!(xResources instanceof Dict)) {
+            continue;
+          }
+          if (xResources.objId && processed.has(xResources.objId)) {
+            continue;
+          }
+
+          nodes.push(xResources);
+          if (xResources.objId) {
+            processed.put(xResources.objId);
+          }
+        }
+      }
+
+      const patterns = node.get("Pattern");
+      if (patterns instanceof Dict) {
+        for (let pattern of patterns.getRawValues()) {
+          if (pattern instanceof Ref) {
+            if (processed.has(pattern)) {
+              continue;
+            }
+            try {
+              pattern = xref.fetch(pattern);
+            } catch (ex) {
+              info(`hasCanvasFilters - failed to fetch Pattern: "${ex}".`);
+              return true;
+            }
+          }
+          if (pattern instanceof BaseStream) {
+            if (pattern.dict.objId) {
+              processed.put(pattern.dict.objId);
+            }
+            const patternResources = pattern.dict.get("Resources");
+            if (!(patternResources instanceof Dict)) {
+              continue;
+            }
+            if (
+              patternResources.objId &&
+              processed.has(patternResources.objId)
+            ) {
+              continue;
+            }
+
+            nodes.push(patternResources);
+            if (patternResources.objId) {
+              processed.put(patternResources.objId);
+            }
+            continue;
+          }
+          if (!(pattern instanceof Dict)) {
+            continue;
+          }
+          if (pattern.objId && processed.has(pattern.objId)) {
+            continue;
+          }
+
+          nodes.push(pattern);
+          if (pattern.objId) {
+            processed.put(pattern.objId);
+          }
+        }
+      }
+
+      // Type3 fonts can have their own Resources dictionary which may contain
+      // ExtGState with filters.
+      const fonts = node.get("Font");
+      if (fonts instanceof Dict) {
+        for (let font of fonts.getRawValues()) {
+          if (font instanceof Ref) {
+            if (processed.has(font)) {
+              continue;
+            }
+            try {
+              font = xref.fetch(font);
+            } catch (ex) {
+              info(`hasCanvasFilters - failed to fetch Font: "${ex}".`);
+              return true;
+            }
+          }
+          if (!(font instanceof Dict)) {
+            continue;
+          }
+          if (font.objId) {
+            processed.put(font.objId);
+          }
+          const subtype = font.get("Subtype");
+          if (!isName(subtype, "Type3")) {
+            continue;
+          }
+          const fontResources = font.get("Resources");
+          if (!(fontResources instanceof Dict)) {
+            continue;
+          }
+          if (fontResources.objId && processed.has(fontResources.objId)) {
+            continue;
+          }
+
+          nodes.push(fontResources);
+          if (fontResources.objId) {
+            processed.put(fontResources.objId);
+          }
+        }
+      }
+    }
+    return false;
+  }
+
   async fetchBuiltInCMap(name) {
     const cachedData = this.builtInCMapCache.get(name);
     if (cachedData) {
@@ -820,6 +1058,7 @@ class PartialEvaluator {
       // globally, check if the image is still cached locally on the main-thread
       // to avoid having to re-parse the image (since that can be slow).
       if (w * h > 250000 || hasMask) {
+        // TODO(Aditi): Verify
         const localLength = await this.handler.sendWithPromise("commonobj", [
           objId,
           "CopyLocalImage",

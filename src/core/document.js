@@ -550,20 +550,44 @@ class Page {
       });
     }
 
+    const annotationsPromise = this._parsedAnnotations;
+
     const pageListPromise = Promise.all([
       contentStreamPromise,
       resourcesPromise,
-    ]).then(async ([contentStream]) => {
+      annotationsPromise,
+    ]).then(async ([contentStream, , parsedAnnotations]) => {
       const resources = await this.#getMergedResources(
         contentStream.dict,
         RESOURCES_KEYS_OPERATOR_LIST
       );
+
+      // Check for canvas filters in page resources and annotation resources.
+      let hasCanvasFilters = partialEvaluator.hasCanvasFilters(resources);
+      if (!hasCanvasFilters) {
+        // Check annotation appearance resources for canvas filters.
+        for (const annotation of parsedAnnotations) {
+          const appearance = annotation.appearance;
+          if (appearance) {
+            const annotResources = appearance.dict?.get("Resources");
+            if (
+              annotResources &&
+              partialEvaluator.hasCanvasFilters(annotResources)
+            ) {
+              hasCanvasFilters = true;
+              break;
+            }
+          }
+        }
+      }
+
       const opList = new OperatorList(intent, sink);
       handler.send("StartRenderPage", {
         transparency: partialEvaluator.hasBlendModes(
           resources,
           this.nonBlendModesSet
         ),
+        hasCanvasFilters,
         pageIndex,
         cacheKey,
       });
@@ -582,7 +606,7 @@ class Page {
     // eslint-disable-next-line prefer-const
     let [pageOpList, annotations, newAnnotations] = await Promise.all([
       pageListPromise,
-      this._parsedAnnotations,
+      annotationsPromise,
       newAnnotationsPromise,
     ]);
 
