@@ -1647,7 +1647,7 @@ class PDFPageProxy {
       intentState.displayReadyCapability.promise,
       optionalContentConfigPromise,
     ])
-      .then(([transparency, optionalContentConfig]) => {
+      .then(([renderPageData, optionalContentConfig]) => {
         if (this.destroyed) {
           complete();
           return;
@@ -1660,8 +1660,13 @@ class PDFPageProxy {
               "and `PDFDocumentProxy.getOptionalContentConfig` methods."
           );
         }
+        const { transparency, hasCanvasFilters = false } =
+          typeof renderPageData === "object" && renderPageData !== null
+            ? renderPageData
+            : { transparency: renderPageData };
         internalRenderTask.initializeGraphics({
           transparency,
+          hasCanvasFilters: hasCanvasFilters || intentState.hasCanvasFilters,
           optionalContentConfig,
         });
         internalRenderTask.operatorListChanged();
@@ -1863,16 +1868,20 @@ class PDFPageProxy {
   /**
    * @private
    */
-  _startRenderPage(transparency, cacheKey) {
+  _startRenderPage(transparency, cacheKey, hasCanvasFilters = false) {
     const intentState = this._intentStates.get(cacheKey);
     if (!intentState) {
       return; // Rendering was cancelled.
     }
     this._stats?.timeEnd("Page Request");
+    intentState.hasCanvasFilters ||= hasCanvasFilters;
 
     // TODO Refactor RenderPageRequest to separate rendering
     // and operator list logic
-    intentState.displayReadyCapability?.resolve(transparency);
+    intentState.displayReadyCapability?.resolve({
+      transparency,
+      hasCanvasFilters,
+    });
   }
 
   /**
@@ -2782,7 +2791,7 @@ class WorkerTransport {
   }
 
   setupMessageHandler() {
-    const { messageHandler, loadingTask } = this;
+    const { messageHandler, loadingTask, rendererHandler } = this;
 
     messageHandler.on("GetReader", (data, sink) => {
       assert(
@@ -2943,7 +2952,11 @@ class WorkerTransport {
       }
 
       const page = this.#pageCache.get(data.pageIndex);
-      page._startRenderPage(data.transparency, data.cacheKey);
+      page._startRenderPage(
+        data.transparency,
+        data.cacheKey,
+        data.hasCanvasFilters
+      );
     });
 
     const objectHandler = new ObjectHandler({
@@ -2954,10 +2967,32 @@ class WorkerTransport {
       pdfBug: this._params.pdfBug,
     });
 
+    // TODO: add a direct channel between the renderer worker and the core
+    // worker so these main-thread forwarders can be removed.
+    rendererHandler?.on("FontFallback", data => {
+      if (this.destroyed) {
+        return null;
+      }
+      return messageHandler.sendWithPromise("FontFallback", data);
+    });
+
+    const forwardToRenderer = (action, data) => {
+      if (!rendererHandler) {
+        return;
+      }
+      try {
+        rendererHandler.send(action, data);
+      } catch {
+        // Ignore errors if the renderer worker has been destroyed.
+      }
+    };
+
     messageHandler.on("commonobj", ([id, type, exportedData]) => {
       if (this.destroyed) {
         return null; // Ignore any pending requests if the worker was terminated.
       }
+
+      forwardToRenderer("commonobj", [id, type, exportedData]);
 
       if (this.commonObjs.has(id)) {
         return null;
@@ -2971,6 +3006,7 @@ class WorkerTransport {
         // Ignore any pending requests if the worker was terminated.
         return;
       }
+      forwardToRenderer("obj", [id, pageIndex, type, imageData]);
       objectHandler.resolveObject(id, pageIndex, type, imageData);
     });
 
@@ -3220,7 +3256,9 @@ class WorkerTransport {
     await this.messageHandler.sendWithPromise("Cleanup", null);
 
     for (const page of this.#pageCache.values()) {
-      const cleanupSuccessful = page.cleanup();
+      // Keep the OffscreenCanvas reference alive in the renderer worker
+      // during idle cleanup.
+      const cleanupSuccessful = page.cleanup(false, !!this.rendererHandler);
 
       if (!cleanupSuccessful) {
         throw new Error(
@@ -3394,7 +3432,11 @@ class InternalRenderTask {
     });
   }
 
-  initializeGraphics({ transparency = false, optionalContentConfig }) {
+  initializeGraphics({
+    transparency = false,
+    hasCanvasFilters = false,
+    optionalContentConfig,
+  }) {
     if (this.cancelled) {
       return;
     }

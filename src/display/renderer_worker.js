@@ -13,10 +13,21 @@
  * limitations under the License.
  */
 
+import { FontLoader } from "./font_loader.js";
 import { isNodeJS } from "../shared/util.js";
 import { MessageHandler } from "../shared/message_handler.js";
+import { ObjectHandler } from "./object_handler.js";
+import { PDFObjects } from "./pdf_objects.js";
 
 class RendererMessageHandler {
+  static #commonObjs = new PDFObjects();
+
+  static #objsMap = new Map();
+
+  static #fontLoader = new FontLoader({
+    ownerDocument: globalThis,
+  });
+
   static {
     // Worker thread (and not Node.js)?
     if (
@@ -37,6 +48,27 @@ class RendererMessageHandler {
     handler.send("ready", null);
   }
 
+  static #setupObjectHandler(handler) {
+    const objectHandler = new ObjectHandler({
+      messageHandler: handler,
+      commonObjs: this.#commonObjs,
+      fontLoader: this.#fontLoader,
+      pageCache: this.#objsMap,
+      shouldCreatePageObjs: true,
+    });
+
+    handler.on("commonobj", ([id, type, exportedData]) => {
+      if (this.#commonObjs.has(id)) {
+        return null;
+      }
+      return objectHandler.resolveCommonObject(id, type, exportedData);
+    });
+
+    handler.on("obj", ([id, pageIndex, type, imageData]) => {
+      objectHandler.resolveObject(id, pageIndex, type, imageData);
+    });
+  }
+
   static setup(handler) {
     let testMessageProcessed = false;
     handler.on("test", data => {
@@ -48,6 +80,8 @@ class RendererMessageHandler {
       // Ensure that `TypedArray`s can be sent to the worker.
       handler.send("test", data instanceof Uint8Array);
     });
+
+    this.#setupObjectHandler(handler);
   }
 }
 
