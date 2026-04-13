@@ -15,6 +15,7 @@
 
 import { CanvasGraphics } from "./canvas.js";
 import { FontLoader } from "./font_loader.js";
+import { initGPU } from "./webgpu.js";
 import { isNodeJS } from "../shared/util.js";
 import { MessageHandler } from "../shared/message_handler.js";
 import { ObjectHandler } from "./object_handler.js";
@@ -180,6 +181,7 @@ class RendererMessageHandler {
         pageIndex,
         renderTaskId = pageIndex,
         enableHWA = false,
+        enableWebGPU = false,
         optionalContentConfigData,
         optionalContentConfigState,
         optionalContentConfigRenderingIntent,
@@ -190,6 +192,9 @@ class RendererMessageHandler {
         background,
       } = data;
       this.#cleanedPages.delete(pageIndex);
+      if (enableWebGPU) {
+        initGPU();
+      }
       const objs = this.#getPageObjs(pageIndex);
       const optionalContentConfig = new OptionalContentConfig(
         optionalContentConfigData,
