@@ -26,6 +26,7 @@ import {
   info,
   isNodeJS,
   makeObj,
+  OPS,
   RenderingIntentFlag,
   setVerbosityLevel,
   shadow,
@@ -81,6 +82,38 @@ import { TextLayer } from "./text_layer.js";
 import { XfaText } from "./xfa_text.js";
 
 const RENDERING_CANCELLED_TIMEOUT = 100; // ms
+
+// The final operator list can still gain filter-using ops later
+function operatorListHasDOMFilters({ fnArray, argsArray }) {
+  for (let i = 0, ii = fnArray.length; i < ii; i++) {
+    switch (fnArray[i]) {
+      case OPS.setGState: {
+        const [gStateObj] = argsArray[i];
+        if (!Array.isArray(gStateObj)) {
+          break;
+        }
+        for (const [key, value] of gStateObj) {
+          if (key === "TR" && value) {
+            return true;
+          }
+        }
+        break;
+      }
+      case OPS.beginGroup: {
+        const [groupOptions] = argsArray[i];
+        const smask = groupOptions?.smask;
+        if (
+          smask?.subtype === "Luminosity" ||
+          (smask?.subtype === "Alpha" && smask.transferMap)
+        ) {
+          return true;
+        }
+        break;
+      }
+    }
+  }
+  return false;
+}
 
 /**
  * @typedef { Int8Array | Uint8Array | Uint8ClampedArray |
@@ -1327,6 +1360,8 @@ class PDFDocumentProxy {
  * Proxy to a `PDFPage` in the worker thread.
  */
 class PDFPageProxy {
+  #keepRendererCanvas = false;
+
   #pendingCleanup = false;
 
   #pagesMapper = null;
@@ -1515,6 +1550,12 @@ class PDFPageProxy {
       cacheKey,
       makeObj
     );
+    // When rendererHandler is used, the OptionalContentConfig needs to be
+    // transferred to the renderer
+    const optionalContentConfigDataPromise = this._transport.rendererHandler
+      ? this._transport.getOptionalContentConfigData()
+      : null;
+
     // Ensure that a pending `streamReader` cancel timeout is always aborted.
     if (intentState.streamReaderCancelTimeout) {
       clearTimeout(intentState.streamReaderCancelTimeout);
@@ -1638,39 +1679,56 @@ class PDFPageProxy {
       pageColors,
       enableHWA: this._transport.enableHWA,
       operationsFilter,
+      rendererHandler:
+        shouldRecordOperations || shouldRecordImages
+          ? null
+          : this._transport.rendererHandler,
     });
 
     (intentState.renderTasks ||= new Set()).add(internalRenderTask);
     const renderTask = internalRenderTask.task;
 
-    Promise.all([
+    const initializationPromises = [
       intentState.displayReadyCapability.promise,
       optionalContentConfigPromise,
-    ])
-      .then(([renderPageData, optionalContentConfig]) => {
-        if (this.destroyed) {
-          complete();
-          return;
-        }
-        this._stats?.time("Rendering");
+    ];
 
-        if (!(optionalContentConfig.renderingIntent & renderingIntent)) {
-          throw new Error(
-            "Must use the same `intent`-argument when calling the `PDFPageProxy.render` " +
-              "and `PDFDocumentProxy.getOptionalContentConfig` methods."
-          );
-        }
-        const { transparency, hasCanvasFilters = false } =
-          typeof renderPageData === "object" && renderPageData !== null
-            ? renderPageData
-            : { transparency: renderPageData };
-        internalRenderTask.initializeGraphics({
-          transparency,
-          hasCanvasFilters: hasCanvasFilters || intentState.hasCanvasFilters,
+    if (optionalContentConfigDataPromise) {
+      initializationPromises.push(optionalContentConfigDataPromise);
+    }
+
+    Promise.all(initializationPromises)
+      .then(
+        ([
+          renderPageData,
           optionalContentConfig,
-        });
-        internalRenderTask.operatorListChanged();
-      })
+          optionalContentConfigData,
+        ]) => {
+          if (this.destroyed) {
+            complete();
+            return;
+          }
+          this._stats?.time("Rendering");
+
+          if (!(optionalContentConfig.renderingIntent & renderingIntent)) {
+            throw new Error(
+              "Must use the same `intent`-argument when calling the `PDFPageProxy.render` " +
+                "and `PDFDocumentProxy.getOptionalContentConfig` methods."
+            );
+          }
+          const { transparency, hasCanvasFilters = false } =
+            typeof renderPageData === "object" && renderPageData !== null
+              ? renderPageData
+              : { transparency: renderPageData };
+          internalRenderTask.initializeGraphics({
+            transparency,
+            hasCanvasFilters: hasCanvasFilters || intentState.hasCanvasFilters,
+            optionalContentConfig,
+            optionalContentConfigData,
+          });
+          internalRenderTask.operatorListChanged();
+        }
+      )
       .catch(complete);
 
     return renderTask;
@@ -1824,6 +1882,15 @@ class PDFPageProxy {
       }
     }
     this.objs.clear();
+    if (this._transport.rendererHandler) {
+      try {
+        this._transport.rendererHandler.send("cleanupPage", {
+          pageIndex: this._pageIndex,
+        });
+      } catch {
+        // Ignore errors if the renderer worker has been destroyed.
+      }
+    }
     this.#pendingCleanup = false;
 
     return Promise.all(waitOn);
@@ -1834,10 +1901,13 @@ class PDFPageProxy {
    *
    * @param {boolean} [resetStats] - Reset page stats, if enabled.
    *   The default value is `false`.
+   * @param {boolean} [keepRendererCanvas] - When true, keeps the
+   *   OffscreenCanvas reference alive in the renderer worker.
    * @returns {boolean} Indicates if clean-up was successfully run.
    */
-  cleanup(resetStats = false) {
+  cleanup(resetStats = false, keepRendererCanvas = false) {
     this.#pendingCleanup = true;
+    this.#keepRendererCanvas = keepRendererCanvas;
     const success = this.#tryCleanup();
 
     if (resetStats && success) {
@@ -1861,6 +1931,17 @@ class PDFPageProxy {
     }
     this._intentStates.clear();
     this.objs.clear();
+    if (this._transport.rendererHandler) {
+      try {
+        this._transport.rendererHandler.send("cleanupPage", {
+          pageIndex: this._pageIndex,
+          keepCanvas: this.#keepRendererCanvas,
+        });
+      } catch {
+        // Ignore errors if the renderer worker has been destroyed.
+      }
+    }
+    this.#keepRendererCanvas = false;
     this.#pendingCleanup = false;
     return true;
   }
@@ -1893,6 +1974,8 @@ class PDFPageProxy {
       intentState.operatorList.fnArray.push(operatorListChunk.fnArray[i]);
       intentState.operatorList.argsArray.push(operatorListChunk.argsArray[i]);
     }
+    intentState.hasCanvasFilters ||=
+      operatorListHasDOMFilters(operatorListChunk);
     intentState.operatorList.lastChunk = operatorListChunk.lastChunk;
     intentState.operatorList.separateAnnots = operatorListChunk.separateAnnots;
 
@@ -3223,6 +3306,10 @@ class WorkerTransport {
     );
   }
 
+  getOptionalContentConfigData() {
+    return this.#cacheSimpleMethod("GetOptionalContentConfig");
+  }
+
   getPermissions() {
     return this.messageHandler.sendWithPromise("GetPermissions", null);
   }
@@ -3364,6 +3451,13 @@ class RenderTask {
   get imageCoordinates() {
     return this._internalRenderTask.imageCoordinates || null;
   }
+
+  /**
+   * @type {MessageHandler | null}
+   */
+  get rendererHandler() {
+    return this._internalRenderTask.rendererHandler;
+  }
 }
 
 /**
@@ -3374,6 +3468,8 @@ class InternalRenderTask {
   #rAF = null;
 
   static #canvasInUse = new WeakSet();
+
+  static #renderTaskId = 0;
 
   constructor({
     callback,
@@ -3390,6 +3486,7 @@ class InternalRenderTask {
     pageColors = null,
     enableHWA = false,
     operationsFilter = null,
+    rendererHandler = null,
   }) {
     this.callback = callback;
     this.params = params;
@@ -3423,6 +3520,10 @@ class InternalRenderTask {
     this._dependencyTracker = params.dependencyTracker;
     this._imagesTracker = params.imagesTracker;
     this._operationsFilter = operationsFilter;
+    this._rendererHandler = rendererHandler;
+    this._renderTaskId = InternalRenderTask.#renderTaskId++;
+    this._sentOperatorListLength = 0;
+    this._transferredAnnotationCanvasIds = new Set();
   }
 
   get completed() {
@@ -3432,10 +3533,57 @@ class InternalRenderTask {
     });
   }
 
+  get rendererHandler() {
+    return this._rendererHandler;
+  }
+
+  // Transfer annotation canvases to the renderer worker which show up in the
+  // operator list later when it is updated.
+  _getAnnotationCanvasFromOpList(startIdx, endIdx) {
+    const annotationCanvases = [];
+    const transfers = [];
+    if (
+      !this.annotationCanvasMap ||
+      !this._canvas?.ownerDocument ||
+      typeof this._canvas.ownerDocument.createElement !== "function"
+    ) {
+      return { annotationCanvases, transfers };
+    }
+    const { fnArray, argsArray } = this.operatorList;
+    for (let i = startIdx; i < endIdx; i++) {
+      if (fnArray[i] !== OPS.beginAnnotation) {
+        continue;
+      }
+      const [id, , , , hasOwnCanvas] = argsArray[i];
+      if (!hasOwnCanvas || this._transferredAnnotationCanvasIds.has(id)) {
+        continue;
+      }
+
+      let canvas = this.annotationCanvasMap.get(id);
+      if (!canvas) {
+        canvas = this._canvas.ownerDocument.createElement("canvas");
+        this.annotationCanvasMap.set(id, canvas);
+      }
+      if (typeof canvas.transferControlToOffscreen !== "function") {
+        continue;
+      }
+      try {
+        const offscreen = canvas.transferControlToOffscreen();
+        annotationCanvases.push([id, offscreen]);
+        transfers.push(offscreen);
+        this._transferredAnnotationCanvasIds.add(id);
+      } catch (ex) {
+        warn(`Failed to transfer annotation canvas to worker: ${ex.message}.`);
+      }
+    }
+    return { annotationCanvases, transfers };
+  }
+
   initializeGraphics({
     transparency = false,
     hasCanvasFilters = false,
     optionalContentConfig,
+    optionalContentConfigData = null,
   }) {
     if (this.cancelled) {
       return;
@@ -3464,33 +3612,106 @@ class InternalRenderTask {
       imagesTracker,
     } = this.params;
 
-    // When printing in Firefox, we get a specific context in mozPrintCallback
-    // which cannot be created from the canvas itself.
-    const canvasContext =
-      this._canvasContext ||
-      this._canvas.getContext("2d", {
-        alpha: false,
-        willReadFrequently: !this._enableHWA,
-      });
+    // TODO(Aditi): Add support for dependencyTracker and imagesTracker when
+    // rendering in the worker.
+    // Worker Rendering is disabled when canvas filters are present because
+    // OffscreenCanvas's OffscreenCanvasRenderingContext2D completely ignores
+    // the value of .filter defined with a data url.
+    // See bug 2011237
 
-    this.gfx = new CanvasGraphics(
-      canvasContext,
-      this.commonObjs,
-      this.objs,
-      this.canvasFactory,
-      this.filterFactory,
-      { optionalContentConfig },
-      this.annotationCanvasMap,
-      this.pageColors,
-      dependencyTracker,
-      imagesTracker
-    );
-    this.gfx.beginDrawing({
-      transform,
-      viewport,
-      transparency,
-      background,
-    });
+    let useWorkerRendering =
+      this._rendererHandler &&
+      this._canvasContext === null &&
+      !hasCanvasFilters &&
+      !this.pageColors &&
+      !dependencyTracker &&
+      !imagesTracker;
+
+    if (!useWorkerRendering) {
+      this._rendererHandler = null;
+    }
+    if (useWorkerRendering) {
+      try {
+        // Serialize the optional content config, if it exists, so that it can
+        // be sent to the renderer worker.
+        const offscreen = this._canvas.transferControlToOffscreen();
+        const optionalContentConfigState = optionalContentConfig
+          ? optionalContentConfig.getState()
+          : null;
+        const { annotationCanvases, transfers } =
+          this._getAnnotationCanvasFromOpList(
+            0,
+            this.operatorList.argsArray.length
+          );
+        const initTransfers = [offscreen, ...transfers];
+        const initParams = {
+          canvas: offscreen,
+          pageIndex: this._pageIndex,
+          renderTaskId: this._renderTaskId,
+          enableHWA: this._enableHWA,
+          optionalContentConfigData,
+          optionalContentConfigState,
+          optionalContentConfigRenderingIntent:
+            optionalContentConfig?.renderingIntent ?? null,
+          annotationCanvasMap: this.annotationCanvasMap
+            ? annotationCanvases
+            : null,
+          transform,
+          viewport,
+          transparency,
+          background,
+        };
+        this._rendererHandler.send(
+          "InitializeGraphics",
+          initParams,
+          initTransfers
+        );
+        // Mark the canvas as worker-rendered so that consumers (thumbnail
+        // generation, test driver) can detect and clean up appropriately.
+        const rendererHandler = this._rendererHandler;
+        const renderTaskId = this._renderTaskId;
+        this._canvas.resetWorkerCanvas = () => {
+          rendererHandler.send("ResetCanvas", { renderTaskId });
+        };
+      } catch (ex) {
+        warn(
+          `Failed to initialize graphics in renderer worker: ${ex.message}. ` +
+            "Falling back to main-thread rendering."
+        );
+        // Fallback to regular rendering.
+        this._rendererHandler = null;
+        useWorkerRendering = false;
+      }
+    }
+    if (!useWorkerRendering) {
+      // When printing in Firefox, we get a specific context in mozPrintCallback
+      // which cannot be created from the canvas itself.
+      const canvasContext =
+        this._canvasContext ||
+        this._canvas.getContext("2d", {
+          alpha: false,
+          willReadFrequently: !this._enableHWA,
+        });
+
+      this.gfx = new CanvasGraphics(
+        canvasContext,
+        this.commonObjs,
+        this.objs,
+        this.canvasFactory,
+        this.filterFactory,
+        { optionalContentConfig },
+        this.annotationCanvasMap,
+        this.pageColors,
+        dependencyTracker,
+        imagesTracker
+      );
+      this.gfx.beginDrawing({
+        transform,
+        viewport,
+        transparency,
+        background,
+      });
+    }
     this.operatorListIdx = 0;
     this.graphicsReady = true;
     this.graphicsReadyCallback?.();
@@ -3499,6 +3720,15 @@ class InternalRenderTask {
   cancel(error = null, extraDelay = 0) {
     this.running = false;
     this.cancelled = true;
+    if (this._rendererHandler) {
+      try {
+        this._rendererHandler.send("CleanupRenderTask", {
+          renderTaskId: this._renderTaskId,
+        });
+      } catch {
+        // Ignore errors if the renderer worker has been destroyed.
+      }
+    }
     this.gfx?.endDrawing();
     if (this.#rAF) {
       window.cancelAnimationFrame(this.#rAF);
@@ -3520,11 +3750,14 @@ class InternalRenderTask {
       this.graphicsReadyCallback ||= this._continueBound;
       return;
     }
-    this.gfx.dependencyTracker?.growOperationsCount(
-      this.operatorList.fnArray.length
-    );
-    this.stepper?.updateOperatorList(this.operatorList);
-
+    // Support for dependency tracking and stepper when rendering
+    // in the worker has not been added.
+    if (!this._rendererHandler) {
+      this.gfx.dependencyTracker?.growOperationsCount(
+        this.operatorList.fnArray.length
+      );
+      this.stepper?.updateOperatorList(this.operatorList);
+    }
     if (this.running) {
       return;
     }
@@ -3556,6 +3789,67 @@ class InternalRenderTask {
 
   async _next() {
     if (this.cancelled) {
+      return;
+    }
+    const { operatorList, operatorListIdx } = this;
+    if (this._rendererHandler) {
+      // TODO(Aditi): add a global flag.
+      const operatorListArgsArrayLen = operatorList.argsArray.length;
+      const sentLength = Math.min(
+        this._sentOperatorListLength,
+        operatorListArgsArrayLen
+      );
+      const { annotationCanvases, transfers } =
+        this._getAnnotationCanvasFromOpList(
+          sentLength,
+          operatorListArgsArrayLen
+        );
+      if (annotationCanvases.length > 0) {
+        this._rendererHandler.send(
+          "UpdateAnnotationCanvases",
+          {
+            renderTaskId: this._renderTaskId,
+            annotationCanvasMap: annotationCanvases,
+          },
+          transfers
+        );
+      }
+      const fnArray =
+        sentLength < operatorListArgsArrayLen
+          ? operatorList.fnArray.slice(sentLength, operatorListArgsArrayLen)
+          : null;
+      const argsArray =
+        sentLength < operatorListArgsArrayLen
+          ? operatorList.argsArray.slice(sentLength, operatorListArgsArrayLen)
+          : null;
+      this.operatorListIdx = await this._rendererHandler.sendWithPromise(
+        "ExecuteOperatorList",
+        {
+          renderTaskId: this._renderTaskId,
+          fnArray,
+          argsArray,
+          operatorListIdx,
+          operationsFilter:
+            typeof this._operationsFilter === "function"
+              ? null
+              : this._operationsFilter,
+          lastChunk: operatorList.lastChunk,
+        }
+      );
+      this._sentOperatorListLength = operatorListArgsArrayLen;
+      if (this.cancelled) {
+        return;
+      }
+
+      if (this.operatorListIdx === operatorList.argsArray.length) {
+        this.running = false;
+        if (this.operatorList.lastChunk) {
+          InternalRenderTask.#canvasInUse.delete(this._canvas);
+          this.callback();
+        }
+      } else {
+        this._continue();
+      }
       return;
     }
     this.operatorListIdx = this.gfx.executeOperatorList(

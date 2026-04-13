@@ -67,6 +67,29 @@ const SCALE_MATRIX = new DOMMatrix();
 // Used to get some coordinates.
 const XY = new Float32Array(2);
 
+// Cache generated Path2D instances without mutating operatorList arguments,
+// since those arguments may later be sent through postMessage.
+const DRAW_OPS_PATH2D_CACHE = new WeakMap();
+
+function getPath2DFromDrawOps(drawOps) {
+  if (!drawOps) {
+    return new Path2D();
+  }
+  if (drawOps instanceof Path2D) {
+    return drawOps;
+  }
+  if (typeof drawOps !== "object") {
+    return makePathFromDrawOPS(drawOps);
+  }
+
+  let path = DRAW_OPS_PATH2D_CACHE.get(drawOps);
+  if (!path) {
+    path = makePathFromDrawOPS(drawOps);
+    DRAW_OPS_PATH2D_CACHE.set(drawOps, path);
+  }
+  return path;
+}
+
 /**
  * Overrides certain methods on a 2d ctx so that when they are called they
  * will also call the same method on the destCtx. The methods that are
@@ -1628,10 +1651,7 @@ class CanvasGraphics {
     let [path] = data;
     if (!minMax) {
       // The path is empty, so no need to update the current minMax.
-      path ||= data[0] = new Path2D();
-      if (op !== OPS.stroke && op !== OPS.closeStroke) {
-        this.current.tilingPatternDims = null;
-      }
+      path = getPath2DFromDrawOps(path);
       this[op](opIdx, path);
       return;
     }
@@ -1651,9 +1671,7 @@ class CanvasGraphics {
         .recordDependencies(opIdx, ["transform"]);
     }
 
-    if (!(path instanceof Path2D)) {
-      path = data[0] = makePathFromDrawOPS(path);
-    }
+    path = getPath2DFromDrawOps(path);
     Util.axialAlignedBoundingBox(
       minMax,
       getCurrentTransform(this.ctx),
@@ -3011,12 +3029,25 @@ class CanvasGraphics {
           height * this.outputScaleY * viewportScale
         );
 
-        this.annotationCanvas = this.canvasFactory.create(
-          canvasWidth,
-          canvasHeight
-        );
-        const { canvas, context } = this.annotationCanvas;
-        this.annotationCanvasMap.set(id, canvas);
+        let canvas = this.annotationCanvasMap.get(id);
+        let context = null;
+        if (canvas) {
+          canvas.width = canvasWidth;
+          canvas.height = canvasHeight;
+          context = canvas.getContext("2d");
+          if (!context) {
+            throw new Error("Unable to initialize annotation canvas.");
+          }
+          this.annotationCanvas = { canvas, context };
+        } else {
+          this.annotationCanvas = this.canvasFactory.create(
+            canvasWidth,
+            canvasHeight
+          );
+          ({ canvas, context } = this.annotationCanvas);
+          this.annotationCanvasMap.set(id, canvas);
+        }
+
         this.annotationCanvas.savedCtx = this.ctx;
         this.ctx = context;
         this.ctx.save();
