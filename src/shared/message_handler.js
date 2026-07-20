@@ -196,6 +196,11 @@ class MessageHandler {
    * @returns {Promise} Promise to be resolved with response data.
    */
   sendWithPromise(actionName, data, transfers) {
+    if (!this.#messageAC) {
+      return Promise.reject(
+        new Error(`sendWithPromise - "${actionName}" called after destroy.`)
+      );
+    }
     const callbackId = this.callbackId++;
     const capability = Promise.withResolvers();
     this.callbackCapabilities[callbackId] = capability;
@@ -529,9 +534,18 @@ class MessageHandler {
     delete this.streamControllers[streamId];
   }
 
-  destroy() {
+  destroy(reason = null) {
     this.#messageAC?.abort();
     this.#messageAC = null;
+
+    if (reason) {
+      // Settle outstanding `sendWithPromise` calls, since the other side
+      // can no longer respond.
+      for (const callbackId in this.callbackCapabilities) {
+        this.callbackCapabilities[callbackId].reject(reason);
+      }
+      this.callbackCapabilities = Object.create(null);
+    }
   }
 }
 

@@ -2205,7 +2205,11 @@ class RendererWorker {
         }
         this.#messageHandler = messageHandler;
         this.#webWorker = worker;
-
+        // An uncaught exception in the worker means it can no
+        // longer be trusted to respond; fail pending calls and detach.
+        worker.addEventListener("error", event => {
+          this.#onWorkerDied(event.error || event.message);
+        });
         this.#resolve();
       });
 
@@ -2235,6 +2239,24 @@ class RendererWorker {
     } catch (reason) {
       this.#capability.reject(reason);
     }
+  }
+
+  #onWorkerDied(reason) {
+    if (this.destroyed) {
+      return;
+    }
+    const error = new Error(
+      `Renderer worker died: "${reason?.message ?? reason}".`
+    );
+    warn(error.message);
+
+    this.destroyed = true;
+    this.#webWorker?.terminate();
+    this.#webWorker = null;
+    // Rejects all pending promises, and nulls the `messageHandler` getter so
+    // subsequent renders fall back to main-thread rendering.
+    this.#messageHandler?.destroy(error);
+    this.#messageHandler = null;
   }
 
   /**
