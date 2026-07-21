@@ -2113,14 +2113,19 @@ class PDFPageProxy {
  *   parameters.
  */
 class RendererWorker {
+  static #nextId = 0;
+
   #capability = Promise.withResolvers();
 
   #messageHandler = null;
 
   #webWorker = null;
 
+  onDied = null;
+
   constructor({ name = null, verbosity = getVerbosityLevel() } = {}) {
     this.name = name;
+    this.id = RendererWorker.#nextId++;
     this.destroyed = false;
     this.verbosity = verbosity;
     this.#initialize();
@@ -2257,6 +2262,8 @@ class RendererWorker {
     // subsequent renders fall back to main-thread rendering.
     this.#messageHandler?.destroy(error);
     this.#messageHandler = null;
+
+    this.onDied?.(error);
   }
 
   /**
@@ -2282,6 +2289,139 @@ class RendererWorker {
       return GlobalWorkerOptions.rendererSrc;
     }
     throw new Error('No "GlobalWorkerOptions.rendererSrc" specified.');
+  }
+}
+
+/**
+ * The pool of renderer workers with page to worker
+ * assignment. A page gets a worker on first use and keeps it until the
+ * page is destroyed or the worker dies.
+ */
+class RendererWorkerPool {
+  // page -> worker assignment map
+  #assignments = new Map();
+
+  #lastWorker = null;
+
+  #maxWorkers;
+
+  #readyPromise;
+
+  // Pages whose worker died and are not assignable again until their page-level
+  // state is released because a replacement worker would miss their objs.
+  #unassignablePages = new Set();
+
+  #verbosity;
+
+  #workerPages = new Map();
+
+  destroyed = false;
+
+  onWorkerSpawned = null;
+
+  constructor({ verbosity = getVerbosityLevel(), maxWorkers = 0 } = {}) {
+    this.#verbosity = verbosity;
+    this.#maxWorkers =
+      maxWorkers > 0
+        ? maxWorkers
+        : MathClamp((globalThis.navigator?.hardwareConcurrency ?? 2) - 2, 1, 4);
+    this.#readyPromise = this.#spawnWorker().promise;
+  }
+
+  /**
+   * Resolves once the first worker is ready, i.e. worker rendering is
+   * actually available for this document.
+   * @type {Promise<void>}
+   */
+  get promise() {
+    return this.#readyPromise;
+  }
+
+  #spawnWorker() {
+    const worker = new RendererWorker({ verbosity: this.#verbosity });
+    this.#workerPages.set(worker, new Set());
+
+    worker.onDied = () => {
+      for (const pageIndex of this.#workerPages.get(worker)) {
+        this.#assignments.delete(pageIndex);
+        this.#unassignablePages.add(pageIndex);
+      }
+      this.#workerPages.delete(worker);
+    };
+    this.onWorkerSpawned?.(worker);
+    return worker;
+  }
+
+  getWorkerForPage(pageIndex) {
+    if (this.destroyed || this.#unassignablePages.has(pageIndex)) {
+      return null;
+    }
+    let worker = this.#assignments.get(pageIndex);
+    if (worker) {
+      return worker;
+    }
+
+    // Round-robin over the ready workers, we want the adjacent pages to land on 
+    // different workers, so neighboring pages render in parallel.
+    const ready = [];
+    for (const candidate of this.#workerPages.keys()) {
+      if (candidate.messageHandler) {
+        ready.push(candidate);
+      }
+    }
+    // All workers are dead or uninitialized, we fallback to main-thread.
+    if (ready.length === 0) {
+      return null;
+    }
+    worker = ready[(ready.indexOf(this.#lastWorker) + 1) % ready.length];
+    this.#lastWorker = worker;
+
+    const pages = this.#workerPages.get(worker);
+    if (pages.size > 0 && this.#workerPages.size < this.#maxWorkers) {
+      this.#spawnWorker();
+    }
+    pages.add(pageIndex);
+    this.#assignments.set(pageIndex, worker);
+
+    return worker;
+  }
+
+  releasePage(pageIndex) {
+    const worker = this.#assignments.get(pageIndex);
+    if (worker) {
+      this.#workerPages.get(worker)?.delete(pageIndex);
+      this.#assignments.delete(pageIndex);
+    }
+    this.#unassignablePages.delete(pageIndex);
+  }
+
+  broadcast(action, data) {
+    for (const worker of this.#workerPages.keys()) {
+      worker.messageHandler?.send(action, data);
+    }
+  }
+
+  queryAll(action, data) {
+    return Promise.all(
+      [...this.#workerPages.keys()]
+        .filter(worker => worker.messageHandler)
+        .map(async worker => ({
+          worker,
+          result: await worker.messageHandler
+            .sendWithPromise(action, data)
+            .catch(() => null),
+        }))
+    );
+  }
+
+  destroy() {
+    this.destroyed = true;
+    for (const worker of this.#workerPages.keys()) {
+      worker.destroy();
+    }
+    this.#workerPages.clear();
+    this.#assignments.clear();
+    this.#unassignablePages.clear();
   }
 }
 
@@ -4054,6 +4194,7 @@ export {
   PDFPageProxy,
   PDFWorker,
   RendererWorker,
+  RendererWorkerPool,
   RenderTask,
   version,
 };
