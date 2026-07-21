@@ -221,6 +221,9 @@ const RENDERING_CANCELLED_TIMEOUT = 100; // ms
  *   pages are removed, cloned, etc.
  * @property {boolean} [disableWorkerRendering] - Disables rendering of pages in
  *   a worker thread. The default value is `false`.
+ * @property {number} [rendererWorkerPoolSize] - The maximum number of renderer
+ *   workers. The default is derived from `hardwareConcurrency`, clamped to
+ *   [1, 4].
  */
 
 /**
@@ -342,6 +345,10 @@ function getDocument(src = {}) {
     ownerDocument !== globalThis.document ||
     !!styleElement;
 
+  const rendererWorkerPoolSize = Number.isInteger(src.rendererWorkerPoolSize)
+    ? src.rendererWorkerPoolSize
+    : 0;
+
   // Set the main-thread verbosity level.
   setVerbosityLevel(verbosity);
 
@@ -366,8 +373,12 @@ function getDocument(src = {}) {
     });
     task._worker = worker;
   }
+
   if (!disableWorkerRendering) {
-    task._rendererWorker = new RendererWorker({ verbosity });
+    task._rendererPool = new RendererWorkerPool({
+      verbosity,
+      maxWorkers: rendererWorkerPoolSize,
+    });
   }
 
   const docParams = {
@@ -414,12 +425,12 @@ function getDocument(src = {}) {
   };
 
   const workerPromises = [worker.promise, gpuPromise];
-  if (task._rendererWorker) {
+  if (task._rendererPool) {
     workerPromises.push(
-      task._rendererWorker.promise.catch(reason => {
+      task._rendererPool.promise.catch(reason => {
         warn(`Renderer worker disabled: ${reason.message}`);
-        task._rendererWorker?.destroy();
-        task._rendererWorker = null;
+        task._rendererPool?.destroy();
+        task._rendererPool = null;
       })
     );
   }
@@ -479,7 +490,7 @@ function getDocument(src = {}) {
           networkStream,
           {
             ...transportParams,
-            rendererWorker: task._rendererWorker,
+            rendererPool: task._rendererPool,
           },
           transportFactory,
           pagesMapper
@@ -543,7 +554,7 @@ class PDFDocumentLoadingTask {
   /**
    * @private
    */
-  _rendererWorker = null;
+  _rendererPool = null;
 
   /**
    * Unique identifier for the document loading task.
@@ -619,8 +630,8 @@ class PDFDocumentLoadingTask {
     this._worker?.destroy();
     this._worker = null;
 
-    this._rendererWorker?.destroy();
-    this._rendererWorker = null;
+    this._rendererPool?.destroy();
+    this._rendererPool = null;
   }
 
   /**
@@ -1660,7 +1671,8 @@ class PDFPageProxy {
       enableHWA: this._transport.enableHWA,
       enableWebGPU: this._transport.enableWebGPU,
       operationsFilter,
-      rendererWorker: this._transport.rendererWorker,
+      rendererWorker:
+        this._transport.rendererPool?.getWorkerForPage(this._pageIndex) ?? null,
     });
 
     (intentState.renderTasks ||= new Set()).add(internalRenderTask);
@@ -1847,9 +1859,10 @@ class PDFPageProxy {
       }
     }
     this.objs.clear();
-    this._transport.rendererHandler?.send("cleanupPage", {
+    this._transport.rendererHandlerFor(this._pageIndex)?.send("cleanupPage", {
       pageIndex: this._pageIndex,
     });
+    this._transport.rendererPool?.releasePage(this._pageIndex);
     this.#pendingCleanup = false;
 
     return Promise.all(waitOn);
@@ -1890,10 +1903,14 @@ class PDFPageProxy {
     }
     this._intentStates.clear();
     this.objs.clear();
-    this._transport.rendererHandler?.send("cleanupPage", {
+    this._transport.rendererHandlerFor(this._pageIndex)?.send("cleanupPage", {
       pageIndex: this._pageIndex,
       keepCanvas: this.#keepRendererCanvas,
     });
+
+    if (!this.#keepRendererCanvas) {
+      this._transport.rendererPool?.releasePage(this._pageIndex);
+    }
     this.#keepRendererCanvas = false;
     this.#pendingCleanup = false;
     return true;
@@ -1957,12 +1974,13 @@ class PDFPageProxy {
     }
     const { map, transfer } = annotationStorageSerializable;
 
-    // Restore the page in the renderer worker before any `obj` message can
-    // be forwarded, since the core worker emits each object only once and a
-    // dropped one would hang `ExecuteOperatorList` on its dependency.
-    this._transport.rendererHandler?.send("restorePage", {
-      pageIndex: this._pageIndex,
-    });
+    // Pin the page's renderer worker and restore the page in it before any
+    // "obj" message can be forwarded, since the core worker emits each
+    // object only once and a dropped one would hang `ExecuteOperatorList`
+    // on its dependency.
+    this._transport.rendererPool
+      ?.getWorkerForPage(this._pageIndex)
+      ?.messageHandler?.send("restorePage", { pageIndex: this._pageIndex });
 
     const readableStream = this._transport.messageHandler.sendWithStream(
       "GetOperatorList",
@@ -2326,6 +2344,7 @@ class RendererWorkerPool {
         ? maxWorkers
         : MathClamp((globalThis.navigator?.hardwareConcurrency ?? 2) - 2, 1, 4);
     this.#readyPromise = this.#spawnWorker().promise;
+    console.log(`[renderer-pool] created, maxWorkers=${this.#maxWorkers}`);
   }
 
   /**
@@ -2337,9 +2356,19 @@ class RendererWorkerPool {
     return this.#readyPromise;
   }
 
+  /**
+   * The current workers, in spawn order.
+   */
+  get workers() {
+    return this.#workerPages.keys();
+  }
+
   #spawnWorker() {
     const worker = new RendererWorker({ verbosity: this.#verbosity });
     this.#workerPages.set(worker, new Set());
+    console.log(
+      `[renderer-pool] spawning worker ${worker.id} (pool size ${this.#workerPages.size})`
+    );
 
     worker.onDied = () => {
       for (const pageIndex of this.#workerPages.get(worker)) {
@@ -2348,6 +2377,11 @@ class RendererWorkerPool {
       }
       this.#workerPages.delete(worker);
     };
+    // If initialization fails the worker can never become ready, drop it so
+    // it stops counting against the pool cap.
+    worker.promise.catch(() => {
+      this.#workerPages.delete(worker);
+    });
     this.onWorkerSpawned?.(worker);
     return worker;
   }
@@ -2361,7 +2395,7 @@ class RendererWorkerPool {
       return worker;
     }
 
-    // Round-robin over the ready workers, we want the adjacent pages to land on 
+    // Round-robin over the ready workers, we want the adjacent pages to land on
     // different workers, so neighboring pages render in parallel.
     const ready = [];
     for (const candidate of this.#workerPages.keys()) {
@@ -2382,6 +2416,7 @@ class RendererWorkerPool {
     }
     pages.add(pageIndex);
     this.#assignments.set(pageIndex, worker);
+    console.log(`[renderer-pool] page ${pageIndex + 1} -> worker ${worker.id}`);
 
     return worker;
   }
@@ -2412,6 +2447,13 @@ class RendererWorkerPool {
             .catch(() => null),
         }))
     );
+  }
+
+  /**
+   * The worker that owns `pageIndex`, without creating an assignment.
+   */
+  getAssignedWorker(pageIndex) {
+    return this.#assignments.get(pageIndex) || null;
   }
 
   destroy() {
@@ -2797,6 +2839,8 @@ class WorkerTransport {
 
   #passwordCapability = null;
 
+  #rendererReplayData = new Map();
+
   constructor(
     messageHandler,
     loadingTask,
@@ -2816,7 +2860,7 @@ class WorkerTransport {
     });
     this.enableHWA = params.enableHWA;
     this.enableWebGPU = params.enableWebGPU === true;
-    this.rendererWorker = params.rendererWorker || null;
+    this.rendererPool = params.rendererPool || null;
     this.loadingParams = params.loadingParams;
     this._params = params;
 
@@ -2883,12 +2927,41 @@ class WorkerTransport {
   }
 
   /**
-   * Reading through the `RendererWorker` ensures that destroying the renderer
+   * Reading through the pool ensures that a destroyed or dead renderer
    * worker is observed here, without holding a stale handler reference.
-   * @type {MessageHandler | null}
    */
-  get rendererHandler() {
-    return this.rendererWorker?.messageHandler ?? null;
+  rendererHandlerFor(pageIndex) {
+    return (
+      this.rendererPool?.getAssignedWorker(pageIndex)?.messageHandler ?? null
+    );
+  }
+
+  #setupRendererWorker(worker) {
+    worker.promise.then(
+      () => {
+        const { messageHandler } = worker;
+        if (!messageHandler || this.destroyed) {
+          return;
+        }
+        messageHandler.on("FontFallback", data => {
+          if (this.destroyed) {
+            return null;
+          }
+          return this.messageHandler.sendWithPromise("FontFallback", data);
+        });
+        // Bring the worker up to parity with already-emitted common objects;
+        // the worker ignores entries it has already received.
+        for (const [id, [type, exportedData]] of this.#rendererReplayData) {
+          messageHandler.send("commonobj", [id, type, exportedData]);
+        }
+        console.log(
+          `[renderer-pool] worker ${worker.id} ready, replayed ${this.#rendererReplayData.size} commonobjs`
+        );
+      },
+      () => {
+        // Initialization failed; the pool never assigns this worker.
+      }
+    );
   }
 
   getRenderingIntent(
@@ -2993,6 +3066,7 @@ class WorkerTransport {
 
     Promise.all(waitOn).then(() => {
       this.commonObjs.clear();
+      this.#rendererReplayData.clear();
       this.fontLoader.clear();
       this.#methodPromises.clear();
       this.filterFactory.destroy();
@@ -3004,7 +3078,7 @@ class WorkerTransport {
 
       this.messageHandler?.destroy();
       this.messageHandler = null;
-      this.rendererWorker = null;
+      this.rendererPool = null;
 
       this.destroyCapability.resolve();
     }, this.destroyCapability.reject);
@@ -3190,27 +3264,35 @@ class WorkerTransport {
 
     // TODO: add a direct channel between the renderer worker and the core
     // worker so these main-thread forwarders can be removed.
-    this.rendererHandler?.on("FontFallback", data => {
-      if (this.destroyed) {
-        return null;
+    if (this.rendererPool) {
+      for (const worker of this.rendererPool.workers) {
+        this.#setupRendererWorker(worker);
       }
-      return messageHandler.sendWithPromise("FontFallback", data);
-    });
+      this.rendererPool.onWorkerSpawned = this.#setupRendererWorker.bind(this);
+    }
 
-    const forwardToRenderer = (action, data) => {
-      const { rendererHandler } = this;
+    const sendToRenderer = (rendererHandler, action, data) => {
       if (!rendererHandler) {
         return;
       }
       try {
         rendererHandler.send(action, data);
       } catch (reason) {
-        warn(`forwardToRenderer("${action}") failed: ${reason}`);
+        warn(`sendToRenderer("${action}") failed: ${reason}`);
         rendererHandler.send("objFailed", {
           id: data[0],
           pageIndex: action === "obj" ? data[1] : null,
           reason: reason.message,
         });
+      }
+    };
+
+    const broadcastToRenderers = (action, data) => {
+      if (!this.rendererPool) {
+        return;
+      }
+      for (const worker of this.rendererPool.workers) {
+        sendToRenderer(worker.messageHandler, action, data);
       }
     };
 
@@ -3223,28 +3305,31 @@ class WorkerTransport {
         const dataLen = this.commonObjs.has(id)
           ? null
           : objectHandler.resolveCommonObject(id, type, exportedData);
-        const { rendererHandler } = this;
-        if (!dataLen || !rendererHandler) {
+        if (!dataLen || !this.rendererPool) {
           return dataLen;
         }
-        // If the core worker doesn't re-send the image data, ensure that
-        // the renderer worker has a copy too
-        return rendererHandler
-          .sendWithPromise("commonobj", [id, type, exportedData])
-          .catch(() => null)
-          .then(rendererDataLen => {
-            if (!rendererDataLen) {
-              forwardToRenderer("commonobj", [
-                id,
-                "Image",
-                this.commonObjs.get(id),
-              ]);
+        // Ensure that every renderer worker ends up with a copy of the
+        // image, since the core worker doesn't re-send the image data.
+        return this.rendererPool
+          .queryAll("commonobj", [id, type, exportedData])
+          .then(results => {
+            const imgData = this.commonObjs.get(id);
+            this.#rendererReplayData.set(id, ["Image", imgData]);
+            for (const { worker, result } of results) {
+              if (!result) {
+                sendToRenderer(worker.messageHandler, "commonobj", [
+                  id,
+                  "Image",
+                  imgData,
+                ]);
+              }
             }
             return dataLen;
           });
       }
 
-      forwardToRenderer("commonobj", [id, type, exportedData]);
+      this.#rendererReplayData.set(id, [type, exportedData]);
+      broadcastToRenderers("commonobj", [id, type, exportedData]);
 
       if (this.commonObjs.has(id)) {
         return null;
@@ -3258,7 +3343,13 @@ class WorkerTransport {
         // Ignore any pending requests if the worker was terminated.
         return;
       }
-      forwardToRenderer("obj", [id, pageIndex, type, imageData]);
+      sendToRenderer(this.rendererHandlerFor(pageIndex), "obj", [
+        id,
+        pageIndex,
+        type,
+        imageData,
+      ]);
+
       objectHandler.resolveObject(id, pageIndex, type, imageData);
     });
 
@@ -3574,7 +3665,10 @@ class WorkerTransport {
     for (const page of this.#pageCache.values()) {
       // Keep the OffscreenCanvas reference alive in the renderer worker
       // during idle cleanup.
-      const cleanupSuccessful = page.cleanup(false, !!this.rendererHandler);
+      const cleanupSuccessful = page.cleanup(
+        false,
+        !!this.rendererHandlerFor(page._pageIndex)
+      );
 
       if (!cleanupSuccessful) {
         throw new Error(
@@ -3583,12 +3677,13 @@ class WorkerTransport {
       }
     }
     this.commonObjs.clear();
+    this.#rendererReplayData.clear();
     if (!keepLoadedFonts) {
       this.fontLoader.clear();
     }
     // Keep the renderer worker's document-level state in sync with the main
     // thread.
-    this.rendererHandler?.send("Cleanup", { keepLoadedFonts });
+    this.rendererPool?.broadcast("Cleanup", { keepLoadedFonts });
     this.#methodPromises.clear();
     this.filterFactory.destroy(/* keepHCM = */ true);
     TextLayer.cleanup();
@@ -3925,6 +4020,9 @@ class InternalRenderTask {
           initParams,
           initTransfers
         );
+        console.log(
+          `[renderer-pool] page ${this._pageIndex + 1} render START on worker ${this._rendererWorker.id}`
+        );
         // Mark the canvas as worker-rendered so that consumers (thumbnail
         // generation, test driver) can detect and clean up appropriately.
         const { _rendererWorker, _renderTaskId } = this;
@@ -4150,6 +4248,9 @@ class InternalRenderTask {
       if (this.operatorListIdx === operatorList.argsArray.length) {
         this.running = false;
         if (this.operatorList.lastChunk) {
+          console.log(
+            `[renderer-pool] page ${this._pageIndex + 1} render DONE on worker ${this._rendererWorker.id}`
+          );
           InternalRenderTask.#canvasInUse.delete(this._canvas);
           this.callback();
         }
