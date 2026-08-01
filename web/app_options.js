@@ -780,7 +780,7 @@ const defaultOptions = new Map([
     "disableWorkerRendering",
     {
       /** @type {boolean} */
-      value: true,
+      value: false,
       kind: OptionKind.API + OptionKind.PREFERENCE,
     },
   ],
