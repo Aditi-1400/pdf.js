@@ -1692,7 +1692,7 @@ class PDFPageProxy {
       intentState.displayReadyCapability.promise,
       optionalContentConfigPromise,
     ])
-      .then(([transparency, optionalContentConfig]) => {
+      .then(([renderPageData, optionalContentConfig]) => {
         if (this.destroyed) {
           complete();
           return;
@@ -1705,8 +1705,13 @@ class PDFPageProxy {
               "and `PDFDocumentProxy.getOptionalContentConfig` methods."
           );
         }
+        const { transparency, hasCanvasFilters = false } =
+          renderPageData && typeof renderPageData === "object"
+            ? renderPageData
+            : { transparency: renderPageData };
         internalRenderTask.initializeGraphics({
           transparency,
+          hasCanvasFilters: hasCanvasFilters || intentState.hasCanvasFilters,
           optionalContentConfig,
         });
         internalRenderTask.operatorListChanged();
@@ -1908,16 +1913,20 @@ class PDFPageProxy {
   /**
    * @private
    */
-  _startRenderPage(transparency, cacheKey) {
+  _startRenderPage(transparency, cacheKey, hasCanvasFilters = false) {
     const intentState = this._intentStates.get(cacheKey);
     if (!intentState) {
       return; // Rendering was cancelled.
     }
     this._stats?.timeEnd("Page Request");
+    intentState.hasCanvasFilters ||= hasCanvasFilters;
 
     // TODO Refactor RenderPageRequest to separate rendering
     // and operator list logic
-    intentState.displayReadyCapability?.resolve(transparency);
+    intentState.displayReadyCapability?.resolve({
+      transparency,
+      hasCanvasFilters,
+    });
   }
 
   /**
@@ -3005,7 +3014,11 @@ class WorkerTransport {
       }
 
       const page = this.#pageCache.get(data.pageIndex);
-      page._startRenderPage(data.transparency, data.cacheKey);
+      page._startRenderPage(
+        data.transparency,
+        data.cacheKey,
+        data.hasCanvasFilters
+      );
     });
 
     const objectHandler = new ObjectHandler({
@@ -3520,7 +3533,11 @@ class InternalRenderTask {
     });
   }
 
-  initializeGraphics({ transparency = false, optionalContentConfig }) {
+  initializeGraphics({
+    transparency = false,
+    hasCanvasFilters = false,
+    optionalContentConfig,
+  }) {
     if (this.cancelled) {
       return;
     }
