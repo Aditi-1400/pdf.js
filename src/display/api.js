@@ -2239,6 +2239,10 @@ class RendererWorker {
         }
       });
 
+      messageHandler.on("RenderFrame", frame => {
+        InternalRenderTask.handleRenderFrame(frame);
+      });
+
       const sendTest = () => {
         const testObj = new Uint8Array();
         // Ensure that we can use `postMessage` transfers.
@@ -3563,15 +3567,24 @@ class InternalRenderTask {
 
   static #canvasInUse = new WeakSet();
 
-  // Since `transferControlToOffscreen()` can only be called once per canvas
-  // we need to keep a track of Maps already transferred canvases to their
-  // worker-side OffscreenCanvas ids, in case they are used in multiple render
-  // tasks.
-  static #transferredCanvases = new WeakMap();
-
-  static #canvasId = 0;
+  // Render tasks drawing in a renderer worker, keyed by id, so that frames
+  // arriving from it can be routed to the right one.
+  static #activeRenderTasks = new Map();
 
   static #renderTaskId = 0;
+
+  static handleRenderFrame(frame) {
+    const task = InternalRenderTask.#activeRenderTasks.get(frame.renderTaskId);
+    if (!task) {
+      frame.bitmap.close();
+      return;
+    }
+    try {
+      task.#drawFrame(frame);
+    } catch (ex) {
+      task.cancel(ex);
+    }
+  }
 
   constructor({
     callback,
@@ -3647,6 +3660,18 @@ class InternalRenderTask {
 
   get rendererHandler() {
     return this._rendererWorker?.messageHandler ?? null;
+  }
+
+  #drawFrame({ bitmap }) {
+    try {
+      if (this.cancelled) {
+        return;
+      }
+      const ctx = this._canvas.getContext("2d", { alpha: false });
+      ctx.drawImage(bitmap, 0, 0);
+    } finally {
+      bitmap.close();
+    }
   }
 
   // Transfer annotation canvases to the renderer worker which show up in the
@@ -3755,22 +3780,6 @@ class InternalRenderTask {
       !this.pageColors &&
       !this._recordForDebugger;
 
-    const transferredEntry = InternalRenderTask.#transferredCanvases.get(
-      this._canvas
-    );
-    if (
-      transferredEntry &&
-      (!useWorkerRendering ||
-        transferredEntry.rendererWorker !== this._rendererWorker)
-    ) {
-      // The canvas is only a placeholder now, hence it can only be
-      // re-rendered by the renderer worker owning its OffscreenCanvas.
-      throw new Error(
-        "Cannot re-render a canvas whose control was transferred to a " +
-          "renderer worker, without using that same worker."
-      );
-    }
-
     if (!useWorkerRendering && this._rendererWorker) {
       // Only warn when a renderer worker is actually available, but cannot be
       // used for this particular render
@@ -3779,30 +3788,16 @@ class InternalRenderTask {
       }
       this._rendererWorker = null;
     }
-    let initPromise = null;
     if (useWorkerRendering) {
       try {
-        let offscreen = null;
-        let canvasId;
-        if (transferredEntry) {
-          ({ canvasId } = transferredEntry);
-        } else {
-          offscreen = this._canvas.transferControlToOffscreen();
-          canvasId = InternalRenderTask.#canvasId++;
-          InternalRenderTask.#transferredCanvases.set(this._canvas, {
-            rendererWorker: this._rendererWorker,
-            canvasId,
-          });
-        }
         const { annotationCanvases, transfers } =
           this._getAnnotationCanvasFromOpList(
             0,
             this.operatorList.argsArray.length
           );
-        const initTransfers = offscreen ? [offscreen, ...transfers] : transfers;
         const initParams = {
-          canvas: offscreen,
-          canvasId,
+          width: this._canvas.width,
+          height: this._canvas.height,
           pageIndex: this._pageIndex,
           renderTaskId: this._renderTaskId,
           enableHWA: this._enableHWA,
@@ -3818,26 +3813,18 @@ class InternalRenderTask {
           recordOperations: this._recordOperations,
           recordImages: this._recordImages,
         };
-        initPromise = this.rendererHandler.sendWithPromise(
+        // Wait for the renderer worker to finish setup, so that a failure can
+        // still fall back to main-thread rendering below.
+        await this.rendererHandler.sendWithPromise(
           "InitializeGraphics",
           initParams,
-          initTransfers
+          transfers
         );
-        // Mark the canvas as worker-rendered so that consumers (thumbnail
-        // generation, test driver) can detect and clean up appropriately.
-        const { _rendererWorker, _renderTaskId } = this;
-        this._canvas.resetWorkerCanvas = () => {
-          _rendererWorker.messageHandler?.send("CleanupRenderTask", {
-            renderTaskId: _renderTaskId,
-          });
-          _rendererWorker.messageHandler?.send("ReleaseCanvas", { canvasId });
-        };
-      } catch (ex) {
-        // Once the canvas has been transferred it's detached, hence falling
-        // back to main-thread rendering is no longer possible.
-        if (InternalRenderTask.#transferredCanvases.has(this._canvas)) {
-          throw ex;
+        if (this.cancelled) {
+          return;
         }
+        InternalRenderTask.#activeRenderTasks.set(this._renderTaskId, this);
+      } catch (ex) {
         warn(
           `Failed to initialize graphics in renderer worker: ${ex.message}. ` +
             "Falling back to main-thread rendering."
@@ -3894,13 +3881,6 @@ class InternalRenderTask {
         background,
       });
     }
-    if (initPromise) {
-      // Wait for the renderer worker to finish setup.
-      await initPromise;
-      if (this.cancelled) {
-        return;
-      }
-    }
     this.operatorListIdx = 0;
     this.graphicsReady = true;
     this.graphicsReadyCallback?.();
@@ -3912,6 +3892,7 @@ class InternalRenderTask {
     this.rendererHandler?.send("CleanupRenderTask", {
       renderTaskId: this._renderTaskId,
     });
+    InternalRenderTask.#activeRenderTasks.delete(this._renderTaskId);
     this.gfx?.endDrawing();
     if (this.#rAF) {
       window.cancelAnimationFrame(this.#rAF);
@@ -4051,6 +4032,7 @@ class InternalRenderTask {
       if (this.operatorListIdx === operatorList.argsArray.length) {
         this.running = false;
         if (this.operatorList.lastChunk) {
+          InternalRenderTask.#activeRenderTasks.delete(this._renderTaskId);
           InternalRenderTask.#canvasInUse.delete(this._canvas);
           this.callback();
         }

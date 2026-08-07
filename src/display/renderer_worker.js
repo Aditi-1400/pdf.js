@@ -30,11 +30,6 @@ import { PDFObjects } from "./pdf_objects.js";
 import { WorkerFilterFactory } from "./filter_factory.js";
 
 class RendererMessageHandler {
-  // Holds the `OffscreenCanvas` for each transferred placeholder `<canvas>`,
-  // keyed by main-thread canvas id, so that re-renders can reuse it and the
-  // placeholder keeps its bitmap across `cleanupPage`.
-  static #offscreenCanvases = new Map();
-
   static #cleanedPages = new Set();
 
   static #commonObjs = new PDFObjects();
@@ -59,6 +54,12 @@ class RendererMessageHandler {
     ) {
       this.initializeFromPort(self);
     }
+  }
+
+  static #sendFrame(handler, renderTaskState) {
+    const { canvas, renderTaskId } = renderTaskState;
+    const bitmap = canvas.transferToImageBitmap();
+    handler.send("RenderFrame", { renderTaskId, bitmap }, [bitmap]);
   }
 
   // Merges `[id, canvasName, canvas]` tuples sent from the main thread into
@@ -249,13 +250,10 @@ class RendererMessageHandler {
       this.#cleanupRenderTask(renderTaskId);
     });
 
-    handler.on("ReleaseCanvas", ({ canvasId }) => {
-      this.#offscreenCanvases.delete(canvasId);
-    });
-
     handler.on("InitializeGraphics", async data => {
       const {
-        canvasId,
+        width,
+        height,
         pageIndex,
         renderTaskId,
         enableHWA = false,
@@ -268,20 +266,14 @@ class RendererMessageHandler {
         recordOperations = false,
         recordImages = false,
       } = data;
-      let canvas = data.canvas;
-      if (canvas) {
-        this.#offscreenCanvases.set(canvasId, canvas);
-      } else {
-        canvas = this.#offscreenCanvases.get(canvasId);
-        if (!canvas) {
-          throw new Error(
-            "InitializeGraphics - the canvas was already released and " +
-              "cannot be reused."
-          );
-        }
-      }
+      // Renderer worker makes its own canvas and does not use the one from
+      // the main thread, the drawing result is handed back to the main thread
+      // via ImageBitmap.
+      const canvas = new OffscreenCanvas(width, height);
       const renderTaskState = {
         pageIndex,
+        renderTaskId,
+        canvas,
         gfx: null,
         operatorList: {
           fnArray: [],
@@ -310,10 +302,6 @@ class RendererMessageHandler {
         alpha: false,
         willReadFrequently: !enableHWA,
       });
-      if (!data.canvas) {
-        // In case of a reused canvas reset the context.
-        ctx.reset();
-      }
       const canvasFactory = new OffscreenCanvasFactory({ enableHWA });
       const filterFactory = new WorkerFilterFactory();
       const annotationCanvases = annotationCanvasMap ? new Map() : null;
@@ -412,7 +400,15 @@ class RendererMessageHandler {
         recordedBBoxesBuffer = reader?.buffer;
         const images = renderTaskState.gfx.imagesTracker?.take();
         imageCoordinates = images || null;
+        const aborted = renderTaskState.aborted;
+
+        // `endDrawing` applies the final filter, so snapshot after it. The
+        // frame is sent before this reply, so the main thread has drawn the
+        // canvas by the time the render task reports completion.
         this.#cleanupRenderTask(renderTaskId);
+        if (!aborted) {
+          this.#sendFrame(handler, renderTaskState);
+        }
       }
       return {
         operatorListIdx: currentOperatorListIdx,
