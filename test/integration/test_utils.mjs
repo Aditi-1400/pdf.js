@@ -1059,34 +1059,12 @@ function waitForTooltipToBe(page, selector, text) {
 
 function isCanvasMonochrome(page, pageNumber, rectangle, color) {
   return page.evaluate(
-    async (rect, pageN, col) => {
+    (rect, pageN, col) => {
       const canvas = document.querySelector(
         `.page[data-page-number = "${pageN}"] .canvasWrapper canvas`
       );
-      if (!canvas) {
-        return false;
-      }
       const canvasRect = canvas.getBoundingClientRect();
-      let ctx;
-      try {
-        ctx = canvas.getContext("2d", { willReadFrequently: true });
-      } catch {
-        // Happens when the canvas has been transferred to OffscreenCanvas.
-      }
-      if (!ctx) {
-        const bitmap = await createImageBitmap(canvas);
-        let tempCanvas;
-        if (typeof OffscreenCanvas === "function") {
-          tempCanvas = new OffscreenCanvas(canvas.width, canvas.height);
-        } else {
-          tempCanvas = document.createElement("canvas");
-          tempCanvas.width = canvas.width;
-          tempCanvas.height = canvas.height;
-        }
-        ctx = tempCanvas.getContext("2d", { willReadFrequently: true });
-        ctx.drawImage(bitmap, 0, 0);
-        bitmap.close();
-      }
+      const ctx = canvas.getContext("2d");
       rect ||= canvasRect;
       const { data } = ctx.getImageData(
         rect.x - canvasRect.x,
