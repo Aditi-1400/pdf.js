@@ -134,8 +134,9 @@ class BasePDFPageView extends RenderableView {
           // much and can cause some serious performance issues.
           // To avoid that we only update the canvas every
           // `this.#minDurationToUpdateCanvas` ms.
-          // When rendering in worker, we don't need this optimization because
-          // the rendering is already happening off the main thread.
+          // When rendering in the worker, each frame handed back is already
+          // a complete snapshot, throttled worker-side, so double-buffering
+          // through a temporary canvas would only add a copy.
           if (Date.now() - this.#startTime < this.minDurationToUpdateCanvas) {
             return;
           }
@@ -215,6 +216,7 @@ class BasePDFPageView extends RenderableView {
   async _drawCanvas(options, onCancel, onFinish) {
     const renderTask = (this.renderTask = this.pdfPage.render(options));
     renderTask.onContinue = this.#renderContinueCallback;
+    renderTask.onFrame = () => this.#showCanvas?.(false);
     renderTask.onError = error => {
       if (error instanceof RenderingCancelledException) {
         onCancel();

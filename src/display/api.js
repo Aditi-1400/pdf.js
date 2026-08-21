@@ -1300,6 +1300,9 @@ class PDFDocumentProxy {
  *   boxes of all PDF operations that render onto the canvas.
  * @property {OperationsFilter} [operationsFilter] - If provided, only
  *   run for which this function returns `true`.
+ * @property {boolean} [partialFrames] - Emit partial renderings of the page
+ *   through `RenderTask.onFrame` while it is being drawn. Only has an effect
+ *   when the page is rendered in a renderer worker.
  */
 
 /**
@@ -1540,6 +1543,7 @@ class PDFPageProxy {
     isEditing = false,
     recordImages = false,
     recordOperations = false,
+    partialFrames = false,
     operationsFilter = null,
   }) {
     this._stats?.time("Overall");
@@ -1667,6 +1671,7 @@ class PDFPageProxy {
         background,
         recordOperations: shouldRecordOperations,
         recordImages: shouldRecordImages,
+        partialFrames,
         recordForDebugger,
       },
       objs: this.objs,
@@ -3491,6 +3496,13 @@ class RenderTask {
   onContinue = null;
 
   /**
+   * Callback invoked after a partially-drawn frame from the renderer worker
+   * has been drawn onto the canvas.
+   * @type {function}
+   */
+  onFrame = null;
+
+  /**
    * A function that will be synchronously called when the rendering tasks
    * finishes with an error (either because of an actual error, or because the
    * rendering is cancelled).
@@ -3574,16 +3586,20 @@ class InternalRenderTask {
   static #renderTaskId = 0;
 
   static handleRenderFrame(frame) {
-    const task = InternalRenderTask.#activeRenderTasks.get(frame.renderTaskId);
-    if (!task) {
+    const internalTask = InternalRenderTask.#activeRenderTasks.get(
+      frame.renderTaskId
+    );
+    if (!internalTask) {
       frame.bitmap.close();
       return;
     }
     try {
-      task.#drawFrame(frame);
+      internalTask.#drawFrame(frame);
     } catch (ex) {
-      task.cancel(ex);
+      internalTask.cancel(ex);
+      return;
     }
+    internalTask.task.onFrame?.();
   }
 
   constructor({
@@ -3636,6 +3652,7 @@ class InternalRenderTask {
     this._enableWebGPU = enableWebGPU;
     this._recordOperations = !!params.recordOperations;
     this._recordImages = !!params.recordImages;
+    this._partialFrames = !!params.partialFrames;
     this._recordForDebugger = !!params.recordForDebugger;
     this._operationsFilter = operationsFilter;
     this._rendererWorker = rendererWorker;
@@ -3812,6 +3829,7 @@ class InternalRenderTask {
           background,
           recordOperations: this._recordOperations,
           recordImages: this._recordImages,
+          partialFrames: this._partialFrames,
         };
         // Wait for the renderer worker to finish setup, so that a failure can
         // still fall back to main-thread rendering below.
