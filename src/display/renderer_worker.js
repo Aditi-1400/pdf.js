@@ -18,8 +18,8 @@ import {
   CanvasDependencyTracker,
   CanvasImagesTracker,
 } from "./canvas_dependency_tracker.js";
+import { CanvasGraphics, getAnnotationCanvasName } from "./canvas.js";
 import { isNodeJS, setVerbosityLevel } from "../shared/util.js";
-import { CanvasGraphics } from "./canvas.js";
 import { FontLoader } from "./font_loader.js";
 import { initGPU } from "./webgpu.js";
 import { MessageHandler } from "../shared/message_handler.js";
@@ -58,6 +58,24 @@ class RendererMessageHandler {
     }
   }
 
+  // Flatten the annotation canvases into `[id, canvasName, bitmap]` tuples so
+  // the main thread can rebuild the map with DOM canvases of its own.
+  static #collectAnnotationBitmaps(renderTaskState, transfers) {
+    const map = renderTaskState.gfx?.annotationCanvasMap;
+    if (!map?.size) {
+      return null;
+    }
+    const tuples = [];
+    for (const [id, value] of map) {
+      for (const canvas of Array.isArray(value) ? value : [value]) {
+        const bitmap = canvas.transferToImageBitmap();
+        tuples.push([id, getAnnotationCanvasName(canvas), bitmap]);
+        transfers.push(bitmap);
+      }
+    }
+    return tuples;
+  }
+
   static async #sendFrame(handler, renderTaskState, isFinal) {
     const { canvas, renderTaskId } = renderTaskState;
     // We need to use createImageBitmap for interim frames because
@@ -66,31 +84,15 @@ class RendererMessageHandler {
     const bitmap = isFinal
       ? canvas.transferToImageBitmap()
       : await createImageBitmap(canvas);
-    handler.send("RenderFrame", { renderTaskId, bitmap }, [bitmap]);
-  }
-
-  // Merges `[id, canvasName, canvas]` tuples sent from the main thread into
-  // `map`, mirroring the tagging/matching convention `canvas.js` uses so a
-  // pre-transferred canvas can be found and reused instead of orphaned.
-  static #mergeAnnotationCanvases(map, tuples) {
-    for (const [id, canvasName, canvas] of tuples) {
-      if (!canvasName) {
-        map.set(id, canvas);
-        continue;
-      }
-      canvas._pdfjsCanvasName = canvasName;
-      let canvases = map.get(id);
-      if (!Array.isArray(canvases)) {
-        canvases = [];
-        map.set(id, canvases);
-      }
-      const index = canvases.findIndex(c => c._pdfjsCanvasName === canvasName);
-      if (index === -1) {
-        canvases.push(canvas);
-      } else {
-        canvases[index] = canvas;
-      }
-    }
+    const transfers = [bitmap];
+    const annotationBitmaps = isFinal
+      ? this.#collectAnnotationBitmaps(renderTaskState, transfers)
+      : null;
+    handler.send(
+      "RenderFrame",
+      { renderTaskId, bitmap, annotationBitmaps },
+      transfers
+    );
   }
 
   static #getPageObjs(pageIndex) {
@@ -279,7 +281,7 @@ class RendererMessageHandler {
         renderTaskId,
         enableHWA = false,
         enableWebGPU = false,
-        annotationCanvasMap,
+        hasAnnotationCanvasMap = false,
         transform,
         viewport,
         transparency,
@@ -328,10 +330,7 @@ class RendererMessageHandler {
       });
       const canvasFactory = new OffscreenCanvasFactory({ enableHWA });
       const filterFactory = new WorkerFilterFactory();
-      const annotationCanvases = annotationCanvasMap ? new Map() : null;
-      if (annotationCanvasMap) {
-        this.#mergeAnnotationCanvases(annotationCanvases, annotationCanvasMap);
-      }
+      const annotationCanvases = hasAnnotationCanvasMap ? new Map() : null;
       let bboxTracker = null;
       let dependencyTracker = null;
       let imagesTracker = null;
@@ -369,21 +368,6 @@ class RendererMessageHandler {
       });
 
       renderTaskState.gfx = gfx;
-    });
-
-    handler.on("UpdateAnnotationCanvases", data => {
-      const { renderTaskId, annotationCanvasMap } = data;
-      if (!annotationCanvasMap) {
-        return;
-      }
-      const renderTaskState = this.#renderTaskStates.get(renderTaskId);
-      if (!renderTaskState || !renderTaskState.gfx.annotationCanvasMap) {
-        return;
-      }
-      this.#mergeAnnotationCanvases(
-        renderTaskState.gfx.annotationCanvasMap,
-        annotationCanvasMap
-      );
     });
 
     handler.on("ExecuteOperatorList", async data => {

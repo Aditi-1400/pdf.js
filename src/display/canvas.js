@@ -3732,55 +3732,29 @@ class CanvasGraphics {
           height * this.outputScaleY * viewportScale
         );
 
-        let canvas, context;
+        this.annotationCanvas = this.canvasFactory.create(
+          canvasWidth,
+          canvasHeight
+        );
+        const { canvas, context } = this.annotationCanvas;
         if (canvasName) {
           const canvases = this.annotationCanvasMap.getOrInsertComputed(
             id,
             makeArr
           );
+          setAnnotationCanvasName(canvas, canvasName);
           // Replace any same-named canvas from a previous render so stale
           // low-resolution canvases don't pile up across zooms.
           const index = canvases.findIndex(
             c => getAnnotationCanvasName(c) === canvasName
           );
-          if (index !== -1) {
-            // Reuse a canvas that was already transferred from the main
-            // thread.
-            canvas = canvases[index];
-            canvas.width = canvasWidth;
-            canvas.height = canvasHeight;
-            context = canvas.getContext("2d");
-            if (!context) {
-              throw new Error("Unable to initialize annotation canvas.");
-            }
-            this.annotationCanvas = { canvas, context };
-          } else {
-            this.annotationCanvas = this.canvasFactory.create(
-              canvasWidth,
-              canvasHeight
-            );
-            ({ canvas, context } = this.annotationCanvas);
-            setAnnotationCanvasName(canvas, canvasName);
+          if (index === -1) {
             canvases.push(canvas);
+          } else {
+            canvases[index] = canvas;
           }
         } else {
-          canvas = this.annotationCanvasMap.get(id);
-          if (canvas) {
-            canvas.width = canvasWidth;
-            canvas.height = canvasHeight;
-            context = canvas.getContext("2d");
-            if (!context) {
-              throw new Error("Unable to initialize annotation canvas.");
-            }
-            this.annotationCanvas = { canvas, context };
-          } else {
-            this.annotationCanvas = this.canvasFactory.create(
-              canvasWidth,
-              canvasHeight
-            );
-            ({ canvas, context } = this.annotationCanvas);
-            this.annotationCanvasMap.set(id, canvas);
-          }
+          this.annotationCanvasMap.set(id, canvas);
         }
         this.annotationCanvas.savedCtx = this.ctx;
         this.ctx = context;
@@ -4410,4 +4384,4 @@ for (const op in OPS) {
   }
 }
 
-export { CanvasGraphics };
+export { CanvasGraphics, getAnnotationCanvasName };

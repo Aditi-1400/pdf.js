@@ -26,7 +26,6 @@ import {
   info,
   isNodeJS,
   makeObj,
-  OPS,
   RenderingIntentFlag,
   setVerbosityLevel,
   shadow,
@@ -3658,9 +3657,6 @@ class InternalRenderTask {
     this._rendererWorker = rendererWorker;
     this._renderTaskId = InternalRenderTask.#renderTaskId++;
     this._sentOperatorListLength = 0;
-    // Maps an annotation id to the set of canvas names that have
-    // already been transferred to the worker.
-    this._transferredAnnotationCanvasIds = new Map();
     // We get the recordedBBoxes and debugMetadata from the worker
     // when recording is enabled,
     this.recordedBBoxes = null;
@@ -3679,83 +3675,50 @@ class InternalRenderTask {
     return this._rendererWorker?.messageHandler ?? null;
   }
 
-  #drawFrame({ bitmap }) {
+  // Rebuild the worker's annotation canvases as DOM canvases for the
+  // annotation layer. The first tuple for an id replaces any previous entry,
+  // later ones (checkbox/radio states) append.
+  #drawAnnotationFrames(annotationBitmaps) {
+    const { ownerDocument } = this._canvas;
+    const seen = new Set();
+    for (const [id, canvasName, bitmap] of annotationBitmaps) {
+      const canvas = ownerDocument.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext("2d").drawImage(bitmap, 0, 0);
+
+      if (!canvasName) {
+        this.annotationCanvasMap.set(id, canvas);
+        continue;
+      }
+      canvas.setAttribute("data-canvas-name", canvasName);
+      if (seen.has(id)) {
+        this.annotationCanvasMap.get(id).push(canvas);
+      } else {
+        seen.add(id);
+        this.annotationCanvasMap.set(id, [canvas]);
+      }
+    }
+  }
+
+  #drawFrame({ bitmap, annotationBitmaps }) {
     try {
       if (this.cancelled) {
         return;
       }
       const ctx = this._canvas.getContext("2d", { alpha: false });
       ctx.drawImage(bitmap, 0, 0);
+      if (annotationBitmaps && this.annotationCanvasMap) {
+        this.#drawAnnotationFrames(annotationBitmaps);
+      }
     } finally {
       bitmap.close();
-    }
-  }
-
-  // Transfer annotation canvases to the renderer worker which show up in the
-  // operator list later when it is updated.
-  _getAnnotationCanvasFromOpList(startIdx, endIdx) {
-    const annotationCanvases = [];
-    const transfers = [];
-    if (
-      !this.annotationCanvasMap ||
-      !this._canvas?.ownerDocument ||
-      typeof this._canvas.ownerDocument.createElement !== "function"
-    ) {
-      return { annotationCanvases, transfers };
-    }
-    const { fnArray, argsArray } = this.operatorList;
-    for (let i = startIdx; i < endIdx; i++) {
-      if (fnArray[i] !== OPS.beginAnnotation) {
-        continue;
-      }
-      const [id, , , , hasOwnCanvas, canvasName] = argsArray[i];
-      if (!hasOwnCanvas) {
-        continue;
-      }
-      const transferredNames = this._transferredAnnotationCanvasIds.get(id);
-      if (transferredNames?.has(canvasName)) {
-        continue;
-      }
-
-      let canvas;
-      if (canvasName) {
-        let canvases = this.annotationCanvasMap.get(id);
-        if (!canvases) {
-          canvases = [];
-          this.annotationCanvasMap.set(id, canvases);
+      if (annotationBitmaps) {
+        for (const [, , annotationBitmap] of annotationBitmaps) {
+          annotationBitmap.close();
         }
-        canvas = canvases.find(
-          c => c.getAttribute("data-canvas-name") === canvasName
-        );
-        if (!canvas) {
-          canvas = this._canvas.ownerDocument.createElement("canvas");
-          canvas.setAttribute("data-canvas-name", canvasName);
-          canvases.push(canvas);
-        }
-      } else {
-        canvas = this.annotationCanvasMap.get(id);
-        if (!canvas) {
-          canvas = this._canvas.ownerDocument.createElement("canvas");
-          this.annotationCanvasMap.set(id, canvas);
-        }
-      }
-      if (typeof canvas.transferControlToOffscreen !== "function") {
-        continue;
-      }
-      try {
-        const offscreen = canvas.transferControlToOffscreen();
-        annotationCanvases.push([id, canvasName, offscreen]);
-        transfers.push(offscreen);
-        if (!transferredNames) {
-          this._transferredAnnotationCanvasIds.set(id, new Set([canvasName]));
-        } else {
-          transferredNames.add(canvasName);
-        }
-      } catch (ex) {
-        warn(`Failed to transfer annotation canvas to worker: ${ex.message}.`);
       }
     }
-    return { annotationCanvases, transfers };
   }
 
   async initializeGraphics({
@@ -3807,11 +3770,6 @@ class InternalRenderTask {
     }
     if (useWorkerRendering) {
       try {
-        const { annotationCanvases, transfers } =
-          this._getAnnotationCanvasFromOpList(
-            0,
-            this.operatorList.argsArray.length
-          );
         const initParams = {
           width: this._canvas.width,
           height: this._canvas.height,
@@ -3820,9 +3778,7 @@ class InternalRenderTask {
           enableHWA: this._enableHWA,
           enableWebGPU: this._enableWebGPU,
           optionalContentConfig: optionalContentConfig.serializable,
-          annotationCanvasMap: this.annotationCanvasMap
-            ? annotationCanvases
-            : null,
+          hasAnnotationCanvasMap: !!this.annotationCanvasMap,
           transform,
           viewport,
           transparency,
@@ -3835,8 +3791,7 @@ class InternalRenderTask {
         // still fall back to main-thread rendering below.
         await this.rendererHandler.sendWithPromise(
           "InitializeGraphics",
-          initParams,
-          transfers
+          initParams
         );
         if (this.cancelled) {
           return;
@@ -3986,21 +3941,6 @@ class InternalRenderTask {
         this._sentOperatorListLength,
         operatorListArgsArrayLen
       );
-      const { annotationCanvases, transfers } =
-        this._getAnnotationCanvasFromOpList(
-          sentLength,
-          operatorListArgsArrayLen
-        );
-      if (annotationCanvases.length > 0) {
-        rendererHandler.send(
-          "UpdateAnnotationCanvases",
-          {
-            renderTaskId: this._renderTaskId,
-            annotationCanvasMap: annotationCanvases,
-          },
-          transfers
-        );
-      }
       const fnArray =
         sentLength < operatorListArgsArrayLen
           ? operatorList.fnArray.slice(sentLength, operatorListArgsArrayLen)
