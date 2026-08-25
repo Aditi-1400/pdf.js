@@ -3964,6 +3964,7 @@ class InternalRenderTask {
             : 0;
         }
       }
+      const sentLastChunk = operatorList.lastChunk;
       const response = await rendererHandler.sendWithPromise(
         "ExecuteOperatorList",
         {
@@ -3972,7 +3973,7 @@ class InternalRenderTask {
           argsArray,
           operatorListIdx,
           operationsFilterMask,
-          lastChunk: operatorList.lastChunk,
+          lastChunk: sentLastChunk,
         }
       );
       this.operatorListIdx = response.operatorListIdx;
