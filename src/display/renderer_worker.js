@@ -162,8 +162,12 @@ class RendererMessageHandler {
     if (Date.now() - renderTaskState.lastFrameTime < PARTIAL_FRAME_TIME) {
       return;
     }
+    if (renderTaskState.operatorListIdx === renderTaskState.lastFrameIdx) {
+      return;
+    }
     await this.#sendFrame(handler, renderTaskState, /* isFinal = */ false);
     renderTaskState.lastFrameTime = Date.now();
+    renderTaskState.lastFrameIdx = renderTaskState.operatorListIdx;
   }
 
   static async #executeOperatorList(handler, renderTaskState) {
@@ -187,6 +191,12 @@ class RendererMessageHandler {
       if (renderTaskState.operatorListIdx === operatorList.argsArray.length) {
         return renderTaskState.operatorListIdx;
       }
+      // Flush painted content both before the wait, since it may be a long
+      // stall on a dependency, e.g. a font or an image that has not been
+      // forwarded yet and after it. The lastFrameIdx check in
+      // #maybeSendInterimFrame ensures that at most one frame is sent
+      // when nothing was painted in between.
+      await this.#maybeSendInterimFrame(handler, renderTaskState);
       await promise;
       await this.#maybeSendInterimFrame(handler, renderTaskState);
     }
@@ -307,6 +317,7 @@ class RendererMessageHandler {
           lastChunk: false,
         },
         operatorListIdx: 0,
+        lastFrameIdx: 0,
         operationsFilterMask: null,
         continueResolve: null,
         aborted: false,
