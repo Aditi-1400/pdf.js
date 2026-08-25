@@ -3993,10 +3993,12 @@ class InternalRenderTask {
 
       if (this.operatorListIdx === operatorList.argsArray.length) {
         this.running = false;
-        if (this.operatorList.lastChunk) {
+        if (sentLastChunk) {
           InternalRenderTask.#activeRenderTasks.delete(this._renderTaskId);
           InternalRenderTask.#canvasInUse.delete(this._canvas);
           this.callback();
+        } else if (this.operatorList.lastChunk) {
+          this._continue();
         }
       } else {
         this._continue();
