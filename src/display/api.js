@@ -3759,6 +3759,7 @@ class InternalRenderTask {
     let useWorkerRendering =
       this.rendererHandler &&
       !this.params.canvasContext &&
+      (!background || typeof background === "string") &&
       !hasCanvasFilters &&
       !this.pageColors &&
       !this._recordForDebugger;
