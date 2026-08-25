@@ -3680,6 +3680,9 @@ class InternalRenderTask {
   // later ones (checkbox/radio states) append.
   #drawAnnotationFrames(annotationBitmaps) {
     const { ownerDocument } = this._canvas;
+    if (typeof ownerDocument?.createElement !== "function") {
+      return;
+    }
     const seen = new Set();
     for (const [id, canvasName, bitmap] of annotationBitmaps) {
       const canvas = ownerDocument.createElement("canvas");
