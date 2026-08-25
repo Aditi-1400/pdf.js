@@ -313,61 +313,66 @@ class RendererMessageHandler {
       };
       this.#renderTaskStates.set(renderTaskId, renderTaskState);
 
-      if (enableWebGPU) {
-        await initGPU();
-        if (renderTaskState.aborted) {
-          return;
+      try {
+        if (enableWebGPU) {
+          await initGPU();
+          if (renderTaskState.aborted) {
+            return;
+          }
         }
-      }
-      const objs = this.#getPageObjs(pageIndex);
-      const optionalContentConfig = OptionalContentConfig.fromSerializable(
-        data.optionalContentConfig
-      );
-
-      const ctx = canvas.getContext("2d", {
-        alpha: false,
-        willReadFrequently: !enableHWA,
-      });
-      const canvasFactory = new OffscreenCanvasFactory({ enableHWA });
-      const filterFactory = new WorkerFilterFactory();
-      const annotationCanvases = hasAnnotationCanvasMap ? new Map() : null;
-      let bboxTracker = null;
-      let dependencyTracker = null;
-      let imagesTracker = null;
-      if (recordOperations || recordImages) {
-        bboxTracker = new CanvasBBoxTracker(canvas, 0);
-      }
-      if (recordOperations) {
-        dependencyTracker = new CanvasDependencyTracker(
-          bboxTracker,
-          /* recordDebugMetadata = */ false
+        const objs = this.#getPageObjs(pageIndex);
+        const optionalContentConfig = OptionalContentConfig.fromSerializable(
+          data.optionalContentConfig
         );
+
+        const ctx = canvas.getContext("2d", {
+          alpha: false,
+          willReadFrequently: !enableHWA,
+        });
+        const canvasFactory = new OffscreenCanvasFactory({ enableHWA });
+        const filterFactory = new WorkerFilterFactory();
+        const annotationCanvases = hasAnnotationCanvasMap ? new Map() : null;
+        let bboxTracker = null;
+        let dependencyTracker = null;
+        let imagesTracker = null;
+        if (recordOperations || recordImages) {
+          bboxTracker = new CanvasBBoxTracker(canvas, 0);
+        }
+        if (recordOperations) {
+          dependencyTracker = new CanvasDependencyTracker(
+            bboxTracker,
+            /* recordDebugMetadata = */ false
+          );
+        }
+        if (recordImages) {
+          imagesTracker = new CanvasImagesTracker(canvas);
+        }
+
+        const gfx = new CanvasGraphics(
+          ctx,
+          this.#commonObjs,
+          objs,
+          canvasFactory,
+          filterFactory,
+          { optionalContentConfig },
+          annotationCanvases,
+          /* pageColors = */ null,
+          dependencyTracker ?? bboxTracker,
+          imagesTracker
+        );
+
+        gfx.beginDrawing({
+          transform,
+          viewport,
+          transparency,
+          background,
+        });
+
+        renderTaskState.gfx = gfx;
+      } catch (ex) {
+        this.#cleanupRenderTask(renderTaskId);
+        throw ex;
       }
-      if (recordImages) {
-        imagesTracker = new CanvasImagesTracker(canvas);
-      }
-
-      const gfx = new CanvasGraphics(
-        ctx,
-        this.#commonObjs,
-        objs,
-        canvasFactory,
-        filterFactory,
-        { optionalContentConfig },
-        annotationCanvases,
-        /* pageColors = */ null,
-        dependencyTracker ?? bboxTracker,
-        imagesTracker
-      );
-
-      gfx.beginDrawing({
-        transform,
-        viewport,
-        transparency,
-        background,
-      });
-
-      renderTaskState.gfx = gfx;
     });
 
     handler.on("ExecuteOperatorList", async data => {
