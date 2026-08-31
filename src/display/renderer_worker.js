@@ -95,13 +95,22 @@ class RendererMessageHandler {
     );
   }
 
-  static #getPageObjs(pageIndex) {
-    let objs = this.#objsMap.get(pageIndex);
+  static #getPageObjs(pageId) {
+    let objs = this.#objsMap.get(pageId);
     if (!objs) {
       objs = new PDFObjects();
-      this.#objsMap.set(pageIndex, objs);
+      this.#objsMap.set(pageId, objs);
     }
     return objs;
+  }
+
+  // Object ids contain the id of the page they were parsed from
+  // (`createObjId` in src/core/document.js), which are always stable unlike
+  // the page index, when pages are moved or copied.
+  static #getObjPageId(id, fallbackPageId) {
+    const objIdPattern = /^(?:img|mask|pattern)_p(\d+)_\d+$/;
+    const match = objIdPattern.exec(id);
+    return match ? parseInt(match[1], 10) : fallbackPageId;
   }
 
   static #cleanupRenderTask(renderTaskId) {
@@ -116,12 +125,12 @@ class RendererMessageHandler {
     this.#renderTaskStates.delete(renderTaskId);
   }
 
-  static #cleanupPage(pageIndex) {
-    this.#cleanedPages.add(pageIndex);
-    this.#objsMap.get(pageIndex)?.clear();
-    this.#objsMap.delete(pageIndex);
+  static #cleanupPage(pageId) {
+    this.#cleanedPages.add(pageId);
+    this.#objsMap.get(pageId)?.clear();
+    this.#objsMap.delete(pageId);
     for (const [renderTaskId, renderTaskState] of this.#renderTaskStates) {
-      if (renderTaskState.pageIndex === pageIndex) {
+      if (renderTaskState.pageId === pageId) {
         this.#cleanupRenderTask(renderTaskId);
       }
     }
@@ -220,14 +229,15 @@ class RendererMessageHandler {
     });
 
     handler.on("obj", ([id, pageIndex, type, imageData]) => {
+      const pageId = this.#getObjPageId(id, pageIndex);
       // The page may have been cleaned up before this message was processed;
       // drop the data and release any `ImageBitmap` instead of resurrecting
       // an empty object bag for a dead page.
-      if (this.#cleanedPages.has(pageIndex)) {
+      if (this.#cleanedPages.has(pageId)) {
         imageData?.bitmap?.close();
         return;
       }
-      objectHandler.resolveObject(id, pageIndex, type, imageData);
+      objectHandler.resolveObject(id, pageId, type, imageData);
     });
 
     handler.on("objFailed", ({ id, pageIndex, reason }) => {
@@ -236,10 +246,11 @@ class RendererMessageHandler {
         this.#commonObjs.reject(id, error);
         return;
       }
-      if (this.#cleanedPages.has(pageIndex)) {
+      const pageId = this.#getObjPageId(id, pageIndex);
+      if (this.#cleanedPages.has(pageId)) {
         return;
       }
-      this.#getPageObjs(pageIndex).reject(id, error);
+      this.#getPageObjs(pageId).reject(id, error);
     });
   }
 
@@ -261,12 +272,12 @@ class RendererMessageHandler {
 
     this.#setupObjectHandler(handler);
 
-    handler.on("cleanupPage", ({ pageIndex }) => {
-      this.#cleanupPage(pageIndex);
+    handler.on("cleanupPage", ({ pageId }) => {
+      this.#cleanupPage(pageId);
     });
 
-    handler.on("restorePage", ({ pageIndex }) => {
-      this.#cleanedPages.delete(pageIndex);
+    handler.on("restorePage", ({ pageId }) => {
+      this.#cleanedPages.delete(pageId);
     });
 
     // Mirrors the document-level cleanup the main thread performs in
@@ -287,7 +298,7 @@ class RendererMessageHandler {
       const {
         width,
         height,
-        pageIndex,
+        pageId,
         renderTaskId,
         enableHWA = false,
         enableWebGPU = false,
@@ -305,7 +316,7 @@ class RendererMessageHandler {
       // via ImageBitmap.
       const canvas = new OffscreenCanvas(width, height);
       const renderTaskState = {
-        pageIndex,
+        pageId,
         renderTaskId,
         canvas,
         partialFrames,
@@ -331,7 +342,7 @@ class RendererMessageHandler {
             return;
           }
         }
-        const objs = this.#getPageObjs(pageIndex);
+        const objs = this.#getPageObjs(pageId);
         const optionalContentConfig = OptionalContentConfig.fromSerializable(
           data.optionalContentConfig
         );

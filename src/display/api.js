@@ -1426,6 +1426,14 @@ class PDFPageProxy {
   }
 
   /**
+   * @type {number} The index of the page in the original document, stable
+   *   across page moves/copies, matching the `p<pageId>_<n>` object ids.
+   */
+  get #pageId() {
+    return this.#pagesMapper.getPageId(this._pageIndex + 1) - 1;
+  }
+
+  /**
    * @type {number} The number of degrees the page is rotated clockwise.
    */
   get rotate() {
@@ -1678,6 +1686,7 @@ class PDFPageProxy {
       annotationCanvasMap,
       operatorList: intentState.operatorList,
       pageIndex: this._pageIndex,
+      pageId: this.#pageId,
       canvasFactory: this._transport.canvasFactory,
       filterFactory: this._transport.filterFactory,
       useRequestAnimationFrame: !intentPrint,
@@ -1874,7 +1883,7 @@ class PDFPageProxy {
     }
     this.objs.clear();
     this._transport.rendererHandler?.send("cleanupPage", {
-      pageIndex: this._pageIndex,
+      pageId: this.#pageId,
     });
     this.#pendingCleanup = false;
 
@@ -1914,7 +1923,7 @@ class PDFPageProxy {
     this._intentStates.clear();
     this.objs.clear();
     this._transport.rendererHandler?.send("cleanupPage", {
-      pageIndex: this._pageIndex,
+      pageId: this.#pageId,
     });
     this.#pendingCleanup = false;
     return true;
@@ -1977,18 +1986,17 @@ class PDFPageProxy {
       );
     }
     const { map, transfer } = annotationStorageSerializable;
+    const pageId = this.#pageId;
 
     // Restore the page in the renderer worker before any `obj` message can
     // be forwarded, since the core worker emits each object only once and a
     // dropped one would hang `ExecuteOperatorList` on its dependency.
-    this._transport.rendererHandler?.send("restorePage", {
-      pageIndex: this._pageIndex,
-    });
+    this._transport.rendererHandler?.send("restorePage", { pageId });
 
     const readableStream = this._transport.messageHandler.sendWithStream(
       "GetOperatorList",
       {
-        pageId: this.#pagesMapper.getPageId(this._pageIndex + 1) - 1,
+        pageId,
         pageIndex: this._pageIndex,
         intent: renderingIntent,
         cacheKey,
@@ -3609,6 +3617,7 @@ class InternalRenderTask {
     annotationCanvasMap,
     operatorList,
     pageIndex,
+    pageId,
     canvasFactory,
     filterFactory,
     useRequestAnimationFrame = false,
@@ -3627,6 +3636,7 @@ class InternalRenderTask {
     this.operatorListIdx = null;
     this.operatorList = operatorList;
     this._pageIndex = pageIndex;
+    this._pageId = pageId;
     this.canvasFactory = canvasFactory;
     this.filterFactory = filterFactory;
     this._pdfBug = pdfBug;
@@ -3777,7 +3787,7 @@ class InternalRenderTask {
         const initParams = {
           width: this._canvas.width,
           height: this._canvas.height,
-          pageIndex: this._pageIndex,
+          pageId: this._pageId,
           renderTaskId: this._renderTaskId,
           enableHWA: this._enableHWA,
           enableWebGPU: this._enableWebGPU,

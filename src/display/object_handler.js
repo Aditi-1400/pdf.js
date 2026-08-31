@@ -122,14 +122,17 @@ class ObjectHandler {
     return null;
   }
 
-  resolveObject(id, pageIndex, type, exportedData) {
-    let pageOrObjs = this.pageCache.get(pageIndex);
+  // `pageKey` is the key into `pageCache` - each realm supplies its own
+  // keying (the display index on the main thread, the stable page id in the
+  // renderer worker).
+  resolveObject(id, pageKey, type, exportedData) {
+    let pageOrObjs = this.pageCache.get(pageKey);
     if (!pageOrObjs) {
       if (!this.shouldCreatePageObjs) {
         return;
       }
       pageOrObjs = new PDFObjects();
-      this.pageCache.set(pageIndex, pageOrObjs);
+      this.pageCache.set(pageKey, pageOrObjs);
     }
 
     const objs = pageOrObjs.objs || pageOrObjs;
