@@ -39,6 +39,7 @@ import {
   collectActions,
   getInheritableProperty,
   getNewAnnotationsMap,
+  IDENTITY_MATRIX,
   isWhiteSpace,
   lookupNormalRect,
   MissingDataException,
@@ -587,6 +588,7 @@ class Page {
         task,
         resources,
         operatorList: opList,
+        initialCtm: IDENTITY_MATRIX,
       });
       return opList;
     });
