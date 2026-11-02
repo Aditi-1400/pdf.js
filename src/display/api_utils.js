@@ -19,11 +19,41 @@ import {
   stringToBytes,
   warn,
 } from "../shared/util.js";
+import { MathClamp } from "../shared/math_clamp.js";
 
 // Deprecated API function -- display regardless of the `verbosity` setting.
 function deprecated(details) {
   // eslint-disable-next-line no-console
   console.log("Deprecated API usage: " + details);
+}
+
+function getImageScaleIntent(intentStates, cacheKey, viewport, outputScale) {
+  let imageScale =
+    2 **
+    MathClamp(
+      Math.ceil(Math.log2(viewport.scale * viewport.userUnit * outputScale)),
+      -8,
+      8
+    );
+  let finer = Infinity;
+  for (const [key, state] of intentStates) {
+    if (state.baseCacheKey !== cacheKey || state.streamFailed) {
+      continue;
+    }
+    // An operator list without reduced images is valid for every
+    // resolution, whereas one with reduced images is only valid for its
+    // own resolution and coarser ones.
+    if (state.operatorList.lastChunk && !state.operatorList.hasReducedImages) {
+      return { cacheKey: key, imageScale: state.imageScale };
+    }
+    if (state.imageScale >= imageScale) {
+      finer = Math.min(finer, state.imageScale);
+    }
+  }
+  if (finer !== Infinity) {
+    imageScale = finer;
+  }
+  return { cacheKey: `${cacheKey}_s${imageScale}`, imageScale };
 }
 
 function getUrlProp(val) {
@@ -234,6 +264,7 @@ export {
   deprecated,
   getDataProp,
   getFactoryUrlProp,
+  getImageScaleIntent,
   getUrlProp,
   getWorkerSrc,
   isNameProxy,
