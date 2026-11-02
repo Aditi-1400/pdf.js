@@ -185,12 +185,23 @@ function normalizeBlendMode(value, parsingArray = false) {
   return parsingArray ? null : "source-over";
 }
 
+function isReducedJpx(jpx) {
+  return (
+    jpx &&
+    (jpx.image.reduce > jpx.image.minReduce ||
+      (jpx.alpha && jpx.alpha.reduce > jpx.alpha.minReduce))
+  );
+}
+
 function addCachedImageOps(
   opList,
-  { objId, fn, args, optionalContent, hasMask }
+  { objId, fn, args, optionalContent, hasMask, jpx }
 ) {
   if (objId) {
     opList.addDependency(objId);
+  }
+  if (isReducedJpx(jpx)) {
+    opList.hasReducedImages = true;
   }
   opList.addImageOps(fn, args, optionalContent, hasMask);
 
@@ -229,6 +240,7 @@ class PartialEvaluator {
     handler,
     pageIndex,
     pageProxyId = null,
+    imageScale = 0,
     idFactory,
     fontCache,
     builtInCMapCache,
@@ -242,6 +254,7 @@ class PartialEvaluator {
     this.handler = handler;
     this.pageIndex = pageIndex;
     this.pageProxyId = pageProxyId;
+    this.imageScale = imageScale;
     this.idFactory = idFactory;
     this.fontCache = fontCache;
     this.builtInCMapCache = builtInCMapCache;
@@ -611,6 +624,26 @@ class PartialEvaluator {
     );
   }
 
+  _getImageTargetSize(ctm) {
+    if (!this.imageScale || !ctm) {
+      return null;
+    }
+    const { imageScale } = this;
+    return {
+      width: Math.hypot(ctm[0], ctm[1]) * imageScale,
+      height: Math.hypot(ctm[2], ctm[3]) * imageScale,
+    };
+  }
+
+  #imageDecodeFailed(objId, imageRef, cacheGlobally, reason) {
+    warn(`Unable to decode image "${objId}": "${reason}".`);
+
+    if (imageRef) {
+      this.globalImageCache.addDecodeFailed(imageRef);
+    }
+    return this._sendImgData(objId, /* imgData = */ null, cacheGlobally);
+  }
+
   async buildPaintImageXObject({
     resources,
     image,
@@ -619,6 +652,7 @@ class PartialEvaluator {
     cacheKey,
     localImageCache,
     localColorSpaceCache,
+    targetSize = null,
   }) {
     const { maxImageSize, ignoreErrors, isOffscreenCanvasSupported } =
       this.options;
@@ -795,7 +829,8 @@ class PartialEvaluator {
     } else if (cacheKey && imageRef) {
       cacheGlobally = this.globalImageCache.shouldCache(
         imageRef,
-        this.pageIndex
+        this.pageIndex,
+        targetSize
       );
 
       if (cacheGlobally) {
@@ -803,7 +838,6 @@ class PartialEvaluator {
 
         objId = `${this.idFactory.getDocId()}_${objId}`;
       } else if (this.pageProxyId !== null) {
-        this.globalImageCache.startDecodedImage(imageRef, this.pageProxyId);
         keepDecodedImage = true;
       }
     }
@@ -822,6 +856,7 @@ class PartialEvaluator {
         args,
         optionalContent,
         hasMask,
+        jpx: null, // Set below.
         byteSize: 0, // Temporary entry, to avoid `setData` returning early.
       };
 
@@ -831,11 +866,64 @@ class PartialEvaluator {
         this._sendImgData(objId, /* imgData = */ null, cacheGlobally);
         return;
       }
+    }
 
-      const decodedImgData = this.globalImageCache.takeDecodedImage(imageRef);
+    const cacheImage = jpx => {
+      if (!cacheKey) {
+        return;
+      }
+      const cacheData = { objId, fn, args, optionalContent, hasMask, jpx };
+      localImageCache.set(cacheKey, imageRef, cacheData);
+
+      if (imageRef) {
+        this._regionalImageCache.set(/* name = */ null, imageRef, cacheData);
+
+        if (cacheGlobally) {
+          assert(globalCacheData, "The global cache-data must be available.");
+          this.globalImageCache.setData(imageRef, globalCacheData);
+        }
+      }
+    };
+
+    let jpx;
+    try {
+      jpx = PDFImage.getJpxReduce(this.xref, image, targetSize);
+    } catch (reason) {
+      this.#imageDecodeFailed(objId, imageRef, cacheGlobally, reason);
+      cacheImage(/* jpx = */ null);
+      return;
+    }
+    const jpxReduce = jpx && {
+      image: jpx.image.reduce,
+      alpha: jpx.alpha?.reduce ?? null,
+    };
+    if (keepDecodedImage) {
+      this.globalImageCache.startDecodedImage(
+        imageRef,
+        this.pageProxyId,
+        jpxReduce
+      );
+    }
+
+    if (cacheGlobally) {
+      globalCacheData.jpx = jpx;
+
+      const decodedImgData = this.globalImageCache.takeDecodedImage(
+        imageRef,
+        jpxReduce
+      );
       if (decodedImgData) {
         if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
           decodedImgData.reusedDecodedImage = true;
+        }
+        if (jpx) {
+          jpx.image.reduce = decodedImgData.jpxReduce.image;
+          if (jpx.alpha) {
+            jpx.alpha.reduce = decodedImgData.jpxReduce.alpha;
+          }
+          if (isReducedJpx(jpx)) {
+            operatorList.hasReducedImages = true;
+          }
         }
         this.globalImageCache.setData(imageRef, globalCacheData);
         this.globalImageCache.addByteSize(imageRef, decodedImgData.dataLen);
@@ -853,15 +941,22 @@ class PartialEvaluator {
         const localLength = await this.handler.sendWithPromise("commonobj", [
           objId,
           "CopyLocalImage",
-          { imageRef },
+          { imageRef, jpxReduce },
         ]);
 
         if (localLength) {
+          if (isReducedJpx(jpx)) {
+            operatorList.hasReducedImages = true;
+          }
           this.globalImageCache.setData(imageRef, globalCacheData);
           this.globalImageCache.addByteSize(imageRef, localLength);
           return;
         }
       }
+    }
+
+    if (isReducedJpx(jpx)) {
+      operatorList.hasReducedImages = true;
     }
 
     PDFImage.buildImage({
@@ -872,6 +967,7 @@ class PartialEvaluator {
       pdfFunctionFactory: this._pdfFunctionFactory,
       globalColorSpaceCache: this.globalColorSpaceCache,
       localColorSpaceCache,
+      jpx,
     })
       .then(async imageObj => {
         imgData = await imageObj.createImageData(
@@ -882,6 +978,7 @@ class PartialEvaluator {
           ? imgData.width * imgData.height * 4
           : imgData.data.length;
         imgData.ref = imageRef;
+        imgData.jpxReduce = jpxReduce;
 
         if (cacheGlobally) {
           this.globalImageCache.addByteSize(imageRef, imgData.dataLen);
@@ -890,28 +987,11 @@ class PartialEvaluator {
         }
         return this._sendImgData(objId, imgData, cacheGlobally);
       })
-      .catch(reason => {
-        warn(`Unable to decode image "${objId}": "${reason}".`);
+      .catch(reason =>
+        this.#imageDecodeFailed(objId, imageRef, cacheGlobally, reason)
+      );
 
-        if (imageRef) {
-          this.globalImageCache.addDecodeFailed(imageRef);
-        }
-        return this._sendImgData(objId, /* imgData = */ null, cacheGlobally);
-      });
-
-    if (cacheKey) {
-      const cacheData = { objId, fn, args, optionalContent, hasMask };
-      localImageCache.set(cacheKey, imageRef, cacheData);
-
-      if (imageRef) {
-        this._regionalImageCache.set(/* name = */ null, imageRef, cacheData);
-
-        if (cacheGlobally) {
-          assert(globalCacheData, "The global cache-data must be available.");
-          this.globalImageCache.setData(imageRef, globalCacheData);
-        }
-      }
-    }
+    cacheImage(jpx);
   }
 
   #createTransferMap(fn) {
@@ -1788,8 +1868,9 @@ class PartialEvaluator {
             isValidName = args[0] instanceof Name;
             name = args[0].name;
 
+            const targetSize = self._getImageTargetSize(stateManager.state.ctm);
             if (isValidName) {
-              const localImage = localImageCache.getByName(name);
+              const localImage = localImageCache.getByName(name, targetSize);
               if (localImage) {
                 addCachedImageOps(operatorList, localImage);
                 args = null;
@@ -1806,9 +1887,13 @@ class PartialEvaluator {
                 let xobj = xobjs.getRaw(name);
                 if (xobj instanceof Ref) {
                   const cachedImage =
-                    localImageCache.getByRef(xobj) ||
-                    self._regionalImageCache.getByRef(xobj) ||
-                    self.globalImageCache.getData(xobj, self.pageIndex);
+                    localImageCache.getByRef(xobj, targetSize) ||
+                    self._regionalImageCache.getByRef(xobj, targetSize) ||
+                    self.globalImageCache.getData(
+                      xobj,
+                      self.pageIndex,
+                      targetSize
+                    );
                   if (cachedImage) {
                     addCachedImageOps(operatorList, cachedImage);
                     resolveXObject();
@@ -1854,6 +1939,7 @@ class PartialEvaluator {
                       cacheKey: name,
                       localImageCache,
                       localColorSpaceCache,
+                      targetSize,
                     })
                     .then(resolveXObject, rejectXObject);
                   return;

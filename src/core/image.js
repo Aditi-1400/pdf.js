@@ -139,7 +139,76 @@ function sumPreblendedRow(
   }
 }
 
+function getFilterName(xref, dict) {
+  const filter = dict.get("F", "Filter");
+  if (filter instanceof Name) {
+    return filter.name;
+  }
+  if (Array.isArray(filter)) {
+    const lastFilter = xref.fetchIfRef(filter.at(-1));
+    if (lastFilter instanceof Name) {
+      return lastFilter.name;
+    }
+  }
+  return null;
+}
+
 class PDFImage {
+  static getJpxReduceInfo(image) {
+    const props = JpxImage.parseImageProperties(image.stream);
+    image.stream.reset();
+    return {
+      ...props,
+      minReduce: ImageResizer.getReducePowerForJPX(
+        props.width,
+        props.height,
+        props.componentsCount
+      ),
+      maxReduce: props.decompositionLevels,
+    };
+  }
+
+  static getJpxReduce(xref, image, targetSize) {
+    if (getFilterName(xref, image.dict) !== "JPXDecode") {
+      return null;
+    }
+    const getPart = stream => {
+      const jpxInfo = PDFImage.getJpxReduceInfo(stream);
+      return {
+        ...jpxInfo,
+        reduce: ImageResizer.getReducePowerForTargetSize(jpxInfo, targetSize),
+      };
+    };
+    const { dict } = image;
+    const smask = dict.get("SMask");
+    const alpha = smask || dict.get("Mask");
+    const jpx = { image: getPart(image), alpha: null };
+    if (
+      alpha instanceof BaseStream &&
+      (smask || alpha.dict.get("IM", "ImageMask"))
+    ) {
+      let alphaWidth, alphaHeight;
+      if (getFilterName(xref, alpha.dict) === "JPXDecode") {
+        jpx.alpha = getPart(alpha);
+        const factor = 2 ** jpx.alpha.reduce;
+        alphaWidth = Math.ceil(jpx.alpha.width / factor);
+        alphaHeight = Math.ceil(jpx.alpha.height / factor);
+      } else {
+        alphaWidth = alpha.dict.get("W", "Width");
+        alphaHeight = alpha.dict.get("H", "Height");
+      }
+      const part = jpx.image;
+      while (
+        part.reduce > part.minReduce &&
+        (Math.ceil(part.width / 2 ** part.reduce) < alphaWidth ||
+          Math.ceil(part.height / 2 ** part.reduce) < alphaHeight)
+      ) {
+        part.reduce--;
+      }
+    }
+    return jpx;
+  }
+
   constructor({
     xref,
     res,
@@ -151,34 +220,20 @@ class PDFImage {
     pdfFunctionFactory,
     globalColorSpaceCache,
     localColorSpaceCache,
+    jpxPart = null,
+    alphaJpxPart = null,
   }) {
     this.image = image;
     const dict = image.dict;
 
-    const filter = dict.get("F", "Filter");
-    let filterName;
-    if (filter instanceof Name) {
-      filterName = filter.name;
-    } else if (Array.isArray(filter)) {
-      const lastFilter = xref.fetchIfRef(filter.at(-1));
-      if (lastFilter instanceof Name) {
-        filterName = lastFilter.name;
-      }
-    }
-    switch (filterName) {
+    switch (getFilterName(xref, dict)) {
       case "JPXDecode":
-        ({
-          width: image.width,
-          height: image.height,
-          componentsCount: image.numComps,
-          bitsPerComponent: image.bitsPerComponent,
-        } = JpxImage.parseImageProperties(image.stream));
-        image.stream.reset();
-        const reducePower = ImageResizer.getReducePowerForJPX(
-          image.width,
-          image.height,
-          image.numComps
-        );
+        const jpxInfo = jpxPart ?? PDFImage.getJpxReduceInfo(image);
+        image.width = jpxInfo.width;
+        image.height = jpxInfo.height;
+        image.numComps = jpxInfo.componentsCount;
+        image.bitsPerComponent = jpxInfo.bitsPerComponent;
+        const reducePower = jpxPart?.reduce ?? jpxInfo.minReduce;
         this.jpxDecoderOptions = {
           numComponents: 0,
           isIndexedColormap: false,
@@ -364,6 +419,7 @@ class PDFImage {
         pdfFunctionFactory,
         globalColorSpaceCache,
         localColorSpaceCache,
+        jpxPart: alphaJpxPart,
       });
     } else if (mask) {
       if (mask instanceof BaseStream) {
@@ -385,6 +441,7 @@ class PDFImage {
             pdfFunctionFactory,
             globalColorSpaceCache,
             localColorSpaceCache,
+            jpxPart: alphaJpxPart,
           });
         }
       } else {
@@ -406,6 +463,7 @@ class PDFImage {
     pdfFunctionFactory,
     globalColorSpaceCache,
     localColorSpaceCache,
+    jpx = null,
   }) {
     const imageData = image;
     let smaskData = null;
@@ -438,6 +496,8 @@ class PDFImage {
       pdfFunctionFactory,
       globalColorSpaceCache,
       localColorSpaceCache,
+      jpxPart: jpx?.image,
+      alphaJpxPart: jpx?.alpha,
     });
   }
 
