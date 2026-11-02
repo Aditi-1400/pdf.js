@@ -44,6 +44,7 @@ import {
   getWorkerSrc,
   isRefProxy,
   LoopbackPort,
+  releaseReducedImages,
   StatTimer,
 } from "./api_utils.js";
 import { isDataScheme, isValidFetchUrl } from "./dom_utils.js";
@@ -1899,7 +1900,16 @@ class PDFPageProxy {
    * @returns {boolean} Indicates if clean-up was successfully run.
    */
   #tryCleanup() {
-    if (!this.#pendingCleanup || this.destroyed) {
+    if (this.destroyed) {
+      return false;
+    }
+    releaseReducedImages(
+      this._intentStates,
+      this.objs,
+      this._transport,
+      this._id
+    );
+    if (!this.#pendingCleanup) {
       return false;
     }
     for (const { renderTasks, operatorList } of this._intentStates.values()) {
@@ -3218,6 +3228,14 @@ class WorkerTransport {
       this.messageHandler.send("CleanupPage", { pageProxyId });
     }
     this.rendererWorker?.cleanupPage(pageProxyId);
+  }
+
+  releaseObj(pageProxyId, objId) {
+    this.rendererWorker?.releaseObj(pageProxyId, objId);
+  }
+
+  releaseOperatorList(pageProxyId, operatorList) {
+    this.rendererWorker?.releaseOperatorList(pageProxyId, operatorList);
   }
 
   cachedPageNumber(ref) {

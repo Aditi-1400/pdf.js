@@ -16,6 +16,7 @@
 import {
   _isValidExplicitDest,
   isNodeJS,
+  OPS,
   stringToBytes,
   warn,
 } from "../shared/util.js";
@@ -54,6 +55,72 @@ function getImageScaleIntent(intentStates, cacheKey, viewport, outputScale) {
     imageScale = finer;
   }
   return { cacheKey: `${cacheKey}_s${imageScale}`, imageScale };
+}
+
+function addPageObjIds(fnArray, argsArray, objIds) {
+  for (let i = 0, ii = fnArray.length; i < ii; i++) {
+    const args = argsArray[i];
+    switch (fnArray[i]) {
+      case OPS.dependency:
+        for (const objId of args) {
+          if (!objId.startsWith("g_")) {
+            objIds.add(objId);
+          }
+        }
+        break;
+      case OPS.shadingFill:
+        objIds.add(args[0]);
+        break;
+      case OPS.setFillColorN:
+      case OPS.setStrokeColorN:
+        if (args[0] === "Shading") {
+          objIds.add(args[1]);
+        } else if (args[0] === "TilingPattern") {
+          addPageObjIds(args[2].fnArray, args[2].argsArray, objIds);
+        }
+        break;
+    }
+  }
+}
+
+function releaseReducedImages(intentStates, objs, transport, pageProxyId) {
+  const keptStates = new Map();
+  for (const state of intentStates.values()) {
+    const { baseCacheKey, imageScale, operatorList, streamFailed } = state;
+    if (!baseCacheKey || !operatorList.lastChunk || streamFailed) {
+      continue;
+    }
+    const kept = keptStates.get(baseCacheKey);
+    if (
+      !kept ||
+      (kept.operatorList.hasReducedImages &&
+        (!operatorList.hasReducedImages || imageScale > kept.imageScale))
+    ) {
+      keptStates.set(baseCacheKey, state);
+    }
+  }
+  const objIds = new Set();
+  for (const [cacheKey, state] of intentStates) {
+    const { baseCacheKey, operatorList, renderTasks } = state;
+    const kept = keptStates.get(baseCacheKey);
+    if (
+      !kept ||
+      kept === state ||
+      !operatorList.lastChunk ||
+      renderTasks.size > 0
+    ) {
+      continue;
+    }
+    addPageObjIds(operatorList.fnArray, operatorList.argsArray, objIds);
+    intentStates.delete(cacheKey);
+    transport.releaseOperatorList(pageProxyId, operatorList);
+  }
+  for (const objId of objIds) {
+    objs.get(objId, () => {
+      objs.delete(objId);
+      transport.releaseObj(pageProxyId, objId);
+    });
+  }
 }
 
 function getUrlProp(val) {
@@ -272,5 +339,6 @@ export {
   isSameOrigin,
   isValidExplicitDest,
   LoopbackPort,
+  releaseReducedImages,
   StatTimer,
 };
