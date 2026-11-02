@@ -1050,7 +1050,13 @@ class PDFPageView extends BasePDFPageView {
     return canvasWrapper;
   }
 
-  _getRenderingContext(canvas, transform, recordOperations, recordImages) {
+  _getRenderingContext(
+    canvas,
+    transform,
+    imageOutputScale,
+    recordOperations,
+    recordImages
+  ) {
     return {
       canvas,
       transform,
@@ -1063,6 +1069,7 @@ class PDFPageView extends BasePDFPageView {
       recordOperations,
       recordImages,
       partialFrames: true,
+      imageOutputScale,
     };
   }
 
@@ -1197,8 +1204,22 @@ class PDFPageView extends BasePDFPageView {
     const transform = outputScale.scaled
       ? [outputScale.sx, 0, 0, outputScale.sy, 0, 0]
       : null;
+    // Decode images for the detail view's resolution when one will be drawn
+    // on top, such that both canvases share the same operator list.
+    const imageOutputScale =
+      this.#hasRestrictedScaling &&
+      this.enableDetailCanvas &&
+      this.maxCanvasPixels > 0
+        ? OutputScale.pixelRatio
+        : outputScale.sx;
     const resultPromise = this._drawCanvas(
-      this._getRenderingContext(canvas, transform, recordBBoxes, recordImages),
+      this._getRenderingContext(
+        canvas,
+        transform,
+        imageOutputScale,
+        recordBBoxes,
+        recordImages
+      ),
       () => {
         if (prevCanvas) {
           prevCanvas.remove();
