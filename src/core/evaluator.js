@@ -640,15 +640,6 @@ class PartialEvaluator {
     };
   }
 
-  #imageDecodeFailed(objId, imageRef, cacheGlobally, reason) {
-    warn(`Unable to decode image "${objId}": "${reason}".`);
-
-    if (imageRef) {
-      this.globalImageCache.addDecodeFailed(imageRef);
-    }
-    return this._sendImgData(objId, /* imgData = */ null, cacheGlobally);
-  }
-
   async buildPaintImageXObject({
     resources,
     image,
@@ -873,6 +864,15 @@ class PartialEvaluator {
       }
     }
 
+    const decodeFailed = reason => {
+      warn(`Unable to decode image "${objId}": "${reason}".`);
+
+      if (imageRef) {
+        this.globalImageCache.addDecodeFailed(imageRef);
+      }
+      return this._sendImgData(objId, /* imgData = */ null, cacheGlobally);
+    };
+
     const cacheImage = jpx => {
       if (!cacheKey) {
         return;
@@ -894,7 +894,7 @@ class PartialEvaluator {
     try {
       jpx = PDFImage.getJpxReduce(this.xref, image, targetSize);
     } catch (reason) {
-      this.#imageDecodeFailed(objId, imageRef, cacheGlobally, reason);
+      decodeFailed(reason);
       cacheImage(/* jpx = */ null);
       return;
     }
@@ -1002,9 +1002,7 @@ class PartialEvaluator {
         }
         return decodeImage();
       })
-      .catch(reason =>
-        this.#imageDecodeFailed(objId, imageRef, cacheGlobally, reason)
-      );
+      .catch(decodeFailed);
 
     cacheImage(jpx);
   }
