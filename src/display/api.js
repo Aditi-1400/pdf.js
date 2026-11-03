@@ -39,10 +39,12 @@ import {
 import {
   getDataProp,
   getFactoryUrlProp,
+  getImageScaleIntent,
   getUrlProp,
   getWorkerSrc,
   isRefProxy,
   LoopbackPort,
+  releaseReducedImages,
   StatTimer,
 } from "./api_utils.js";
 import { initGPU, isGPUReady } from "./webgpu.js";
@@ -1283,6 +1285,9 @@ class PDFDocumentProxy {
  *   when the page is rendered in a renderer worker.
  * @property {OperationsFilter} [operationsFilter] - If provided, only
  *   run for which this function returns `true`.
+ * @property {number} [imageOutputScale] - Output scale (device pixels per CSS
+ *   pixel) to decode images for; `0` decodes them at full size.
+ *   The default value is `0`.
  */
 
 /**
@@ -1525,6 +1530,7 @@ class PDFPageProxy {
     recordOperations = false,
     partialFrames = false,
     operationsFilter = null,
+    imageOutputScale = 0,
   }) {
     this._stats?.time("Overall");
 
@@ -1534,6 +1540,31 @@ class PDFPageProxy {
       printAnnotationStorage,
       isEditing
     );
+    const intentPrint = !!(
+      intentArgs.renderingIntent & RenderingIntentFlag.PRINT
+    );
+    let baseCacheKey = null;
+    if (imageOutputScale > 0 && !intentPrint) {
+      baseCacheKey = intentArgs.cacheKey;
+      Object.assign(
+        intentArgs,
+        getImageScaleIntent(
+          this._intentStates,
+          baseCacheKey,
+          viewport,
+          imageOutputScale
+        )
+      );
+      for (const state of this._intentStates.values()) {
+        if (
+          state.baseCacheKey === baseCacheKey &&
+          state.streamReaderCancelTimeout
+        ) {
+          clearTimeout(state.streamReaderCancelTimeout);
+          state.streamReaderCancelTimeout = null;
+        }
+      }
+    }
     const { renderingIntent, cacheKey } = intentArgs;
     // If there was a pending destroy, cancel it so no cleanup happens during
     // this call to render.
@@ -1552,8 +1583,6 @@ class PDFPageProxy {
       intentState.streamReaderCancelTimeout = null;
     }
 
-    const intentPrint = !!(renderingIntent & RenderingIntentFlag.PRINT);
-
     // If there's no displayReadyCapability yet, then the operatorList
     // was never requested before. Make the request and create the promise.
     if (!intentState.displayReadyCapability) {
@@ -1563,7 +1592,10 @@ class PDFPageProxy {
         argsArray: [],
         lastChunk: false,
         separateAnnots: null,
+        hasReducedImages: false,
       };
+      intentState.imageScale = intentArgs.imageScale;
+      intentState.baseCacheKey = baseCacheKey;
 
       this._stats?.time("Page Request");
       this._pumpOperatorList(intentArgs);
@@ -1735,6 +1767,7 @@ class PDFPageProxy {
         argsArray: [],
         lastChunk: false,
         separateAnnots: null,
+        hasReducedImages: false,
       };
 
       this._stats?.time("Page Request");
@@ -1866,7 +1899,16 @@ class PDFPageProxy {
    * @returns {boolean} Indicates if clean-up was successfully run.
    */
   #tryCleanup() {
-    if (!this.#pendingCleanup || this.destroyed) {
+    if (this.destroyed) {
+      return false;
+    }
+    releaseReducedImages(
+      this._intentStates,
+      this.objs,
+      this._transport,
+      this._id
+    );
+    if (!this.#pendingCleanup) {
       return false;
     }
     for (const { renderTasks, operatorList } of this._intentStates.values()) {
@@ -1907,6 +1949,8 @@ class PDFPageProxy {
     }
     intentState.operatorList.lastChunk = operatorListChunk.lastChunk;
     intentState.operatorList.separateAnnots = operatorListChunk.separateAnnots;
+    intentState.operatorList.hasReducedImages =
+      operatorListChunk.hasReducedImages;
 
     // Notify all the rendering tasks there are more operators to be consumed.
     for (const internalRenderTask of intentState.renderTasks) {
@@ -1926,6 +1970,7 @@ class PDFPageProxy {
     cacheKey,
     annotationStorageSerializable,
     modifiedIds,
+    imageScale = 0,
   }) {
     if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
       assert(
@@ -1945,6 +1990,7 @@ class PDFPageProxy {
         cacheKey,
         annotationStorage: map,
         modifiedIds,
+        imageScale,
       },
       /* queueingStrategy = */ undefined,
       transfer
@@ -1976,6 +2022,7 @@ class PDFPageProxy {
           if (intentState.operatorList) {
             // Mark operator list as complete.
             intentState.operatorList.lastChunk = true;
+            intentState.streamFailed = true;
 
             for (const internalRenderTask of intentState.renderTasks) {
               internalRenderTask.operatorListChanged();
@@ -3199,6 +3246,14 @@ class WorkerTransport {
       this.messageHandler.send("CleanupPage", { pageProxyId });
     }
     this.rendererWorker?.cleanupPage(pageProxyId);
+  }
+
+  releaseObj(pageProxyId, objId) {
+    this.rendererWorker?.releaseObj(pageProxyId, objId);
+  }
+
+  releaseOperatorList(pageProxyId, operatorList) {
+    this.rendererWorker?.releaseOperatorList(pageProxyId, operatorList);
   }
 
   cachedPageNumber(ref) {

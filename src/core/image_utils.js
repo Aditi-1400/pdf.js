@@ -21,6 +21,46 @@ import {
   warn,
 } from "../shared/util.js";
 import { RefMap, RefSet } from "./primitives.js";
+import { ImageResizer } from "./image_resizer.js";
+
+function getUsableImage(data, targetSize) {
+  if (!data) {
+    return null;
+  }
+  const { jpx } = data;
+  if (!jpx) {
+    return data;
+  }
+  const { image, alpha } = jpx;
+  return ImageResizer.getReducePowerForTargetSize(image, targetSize) <
+    image.reduce ||
+    (alpha &&
+      ImageResizer.getReducePowerForTargetSize(alpha, targetSize) <
+        alpha.reduce)
+    ? null
+    : data;
+}
+
+function isFinerJpxReduce(jpxReduce, otherJpxReduce) {
+  return (
+    !!jpxReduce &&
+    jpxReduce.image <= otherJpxReduce.image &&
+    jpxReduce.alpha <= otherJpxReduce.alpha &&
+    (jpxReduce.image < otherJpxReduce.image ||
+      jpxReduce.alpha < otherJpxReduce.alpha)
+  );
+}
+
+function isFinerImage(data, cachedData) {
+  const { jpx } = data;
+  if (!jpx) {
+    return false;
+  }
+  const cachedJpx = cachedData.jpx;
+  const imageDiff = cachedJpx.image.reduce - jpx.image.reduce;
+  const alphaDiff = (cachedJpx.alpha?.reduce ?? 0) - (jpx.alpha?.reduce ?? 0);
+  return imageDiff >= 0 && alphaDiff >= 0 && (imageDiff > 0 || alphaDiff > 0);
+}
 
 class BaseLocalCache {
   constructor(options) {
@@ -57,12 +97,24 @@ class BaseLocalCache {
 }
 
 class LocalImageCache extends BaseLocalCache {
+  getByName(name, targetSize = null) {
+    const ref = this._nameRefMap.get(name);
+    return ref
+      ? this.getByRef(ref, targetSize)
+      : getUsableImage(this._imageMap.get(name), targetSize);
+  }
+
+  getByRef(ref, targetSize = null) {
+    return getUsableImage(this._imageCache.get(ref), targetSize);
+  }
+
   set(name, ref = null, data) {
     if (typeof name !== "string") {
       throw new Error('LocalImageCache.set - expected "name" argument.');
     }
     if (ref) {
-      if (this._imageCache.has(ref)) {
+      const cachedData = this._imageCache.get(ref);
+      if (cachedData && !isFinerImage(data, cachedData)) {
         return;
       }
       this._nameRefMap.set(name, ref);
@@ -70,7 +122,8 @@ class LocalImageCache extends BaseLocalCache {
       return;
     }
     // name
-    if (this._imageMap.has(name)) {
+    const cachedData = this._imageMap.get(name);
+    if (cachedData && !isFinerImage(data, cachedData)) {
       return;
     }
     this._imageMap.set(name, data);
@@ -161,11 +214,16 @@ class RegionalImageCache extends BaseLocalCache {
     super({ onlyRefs: true });
   }
 
+  getByRef(ref, targetSize = null) {
+    return getUsableImage(this._imageCache.get(ref), targetSize);
+  }
+
   set(name = null, ref, data) {
     if (!ref) {
       throw new Error('RegionalImageCache.set - expected "ref" argument.');
     }
-    if (this._imageCache.has(ref)) {
+    const cachedData = this._imageCache.get(ref);
+    if (cachedData && !isFinerImage(data, cachedData)) {
       return;
     }
     this._imageCache.put(ref, data);
@@ -230,14 +288,18 @@ class GlobalImageCache {
     );
   }
 
-  shouldCache(ref, pageIndex) {
+  shouldCache(ref, pageIndex, targetSize = null) {
     const pageIndexSet = this._refCache.getOrPutComputed(ref, makeSet);
     pageIndexSet.add(pageIndex);
 
     if (pageIndexSet.size < GlobalImageCache.NUM_PAGES_THRESHOLD) {
       return false;
     }
-    if (!this._imageCache.has(ref) && this.#cacheLimitReached) {
+    const cachedData = this._imageCache.get(ref);
+    if (
+      (!cachedData || !getUsableImage(cachedData, targetSize)) &&
+      this.#cacheLimitReached
+    ) {
       return false;
     }
     return true;
@@ -253,8 +315,9 @@ class GlobalImageCache {
 
   /**
    * Track the page before decoding so cleanup can discard the entry.
+   * A finer image, kept or being decoded, isn't replaced by a coarser one.
    */
-  startDecodedImage(ref, pageProxyId) {
+  startDecodedImage(ref, pageProxyId, jpxReduce = null) {
     if (!FeatureTest.isVideoFrameSupported) {
       return;
     }
@@ -264,16 +327,28 @@ class GlobalImageCache {
     ) {
       return;
     }
-    this.#decodedImages.get(ref)?.imgData?.bitmap.close();
-    this.#decodedImages.put(ref, { pageProxyId, imgData: null });
+    const entry = this.#decodedImages.get(ref);
+    if (
+      entry &&
+      isFinerJpxReduce(entry.imgData?.jpxReduce ?? entry.jpxReduce, jpxReduce)
+    ) {
+      return;
+    }
+    entry?.imgData?.bitmap.close();
+    this.#decodedImages.put(ref, { pageProxyId, jpxReduce, imgData: null });
   }
 
   setDecodedImage(ref, imgData) {
     const entry = this.#decodedImages.get(ref);
-    if (!entry || entry.imgData) {
+    if (
+      !entry ||
+      (entry.imgData &&
+        !isFinerJpxReduce(imgData.jpxReduce, entry.imgData.jpxReduce))
+    ) {
       return;
     }
     const { bitmap } = imgData;
+    const prevImgData = entry.imgData;
     try {
       if (bitmap instanceof ImageBitmap) {
         entry.imgData = {
@@ -286,7 +361,9 @@ class GlobalImageCache {
     } catch (reason) {
       warn(`GlobalImageCache.setDecodedImage - "${reason}".`);
     }
-    if (!entry.imgData) {
+    if (entry.imgData !== prevImgData) {
+      prevImgData?.bitmap.close();
+    } else if (!entry.imgData) {
       this.#decodedImages.remove(ref);
     }
   }
@@ -294,12 +371,20 @@ class GlobalImageCache {
   /**
    * @returns {object | null} The cached image, owned by the caller, or null.
    */
-  takeDecodedImage(ref) {
+  takeDecodedImage(ref, jpxReduce) {
     const imgData = this.#decodedImages.get(ref)?.imgData;
     if (!imgData) {
       return null;
     }
     this.#decodedImages.remove(ref);
+    if (
+      jpxReduce &&
+      (imgData.jpxReduce.image > jpxReduce.image ||
+        imgData.jpxReduce.alpha > jpxReduce.alpha)
+    ) {
+      imgData.bitmap.close();
+      return null;
+    }
     return imgData;
   }
 
@@ -320,13 +405,10 @@ class GlobalImageCache {
     if (!imageData) {
       return; // The image data isn't cached (the limit was reached).
     }
-    if (imageData.byteSize) {
-      return; // The byte-size has already been set.
-    }
-    imageData.byteSize = byteSize;
+    imageData.byteSize = Math.max(imageData.byteSize, byteSize);
   }
 
-  getData(ref, pageIndex) {
+  getData(ref, pageIndex, targetSize = null) {
     const pageIndexSet = this._refCache.get(ref);
     if (
       !pageIndexSet ||
@@ -341,7 +423,7 @@ class GlobalImageCache {
     // Ensure that we keep track of all pages containing the image reference.
     pageIndexSet.add(pageIndex);
 
-    return imageData;
+    return getUsableImage(imageData, targetSize);
   }
 
   setData(ref, data) {
@@ -350,7 +432,8 @@ class GlobalImageCache {
         'GlobalImageCache.setData - expected "shouldCache" to have been called.'
       );
     }
-    if (this._imageCache.has(ref)) {
+    const cachedData = this._imageCache.get(ref);
+    if (cachedData && !isFinerImage(data, cachedData)) {
       return;
     }
     if (this.#cacheLimitReached) {

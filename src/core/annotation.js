@@ -1319,6 +1319,7 @@ class Annotation {
       resources,
       operatorList: opList,
       fallbackFontDict: this._fallbackFontDict,
+      initialCtm: Util.transform(transform, matrix),
     });
     opList.addOp(OPS.endAnnotation, []);
 
@@ -2212,6 +2213,7 @@ class WidgetAnnotation extends Annotation {
     const matrix = [1, 0, 0, 1, 0, 0];
     const bbox = [0, 0, this.width, this.height];
     const transform = getTransformMatrix(this.data.rect, bbox, matrix);
+    const rotationMatrix = this.getRotationMatrix(annotationStorage);
 
     const optionalContent = this._oc;
     if (optionalContent !== undefined) {
@@ -2222,7 +2224,7 @@ class WidgetAnnotation extends Annotation {
       this.data.id,
       this.data.rect,
       transform,
-      this.getRotationMatrix(annotationStorage),
+      rotationMatrix,
       isUsingOwnCanvas,
     ]);
 
@@ -2232,6 +2234,7 @@ class WidgetAnnotation extends Annotation {
       task,
       resources: this._fieldResources.mergedResources,
       operatorList: opList,
+      initialCtm: Util.transform(transform, rotationMatrix),
     });
     opList.addOp(OPS.endAnnotation, []);
 

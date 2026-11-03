@@ -1100,6 +1100,7 @@ class Driver {
 
             const transform =
               outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
+            const imageOutputScale = outputScale;
 
             // Initialize various `eq` test subtypes, see comment below.
             let renderAnnotations = false,
@@ -1216,6 +1217,7 @@ class Driver {
               annotationCanvasMap,
               pageColors,
               transform,
+              imageOutputScale,
             };
             if (renderForms) {
               renderContext.annotationMode = AnnotationMode.ENABLE_FORMS;
@@ -1332,6 +1334,7 @@ class Driver {
                     annotationCanvasMap,
                     pageColors,
                     transform,
+                    imageOutputScale,
                     recordOperations: false,
                     operationsFilter(index) {
                       if (recordedBBoxes.isEmpty(index)) {
