@@ -85,6 +85,7 @@ import { getFontSubstitution } from "./font_substitutions.js";
 import { getGlyphsUnicode } from "./glyphlist.js";
 import { getMetrics } from "./metrics.js";
 import { getUnicodeForGlyph } from "./unicode.js";
+import { JpxError } from "./jpx.js";
 import { MurmurHash3_64 } from "../shared/murmurhash3.js";
 import { PDFImage } from "./image.js";
 import { Stream } from "./stream.js";
@@ -183,6 +184,10 @@ function normalizeBlendMode(value, parsingArray = false) {
     warn(`Unsupported blend mode: ${value.name}`);
   }
   return parsingArray ? null : "source-over";
+}
+
+function getJpxReduceLevels(jpx) {
+  return jpx && { image: jpx.image.reduce, alpha: jpx.alpha?.reduce ?? null };
 }
 
 function isReducedJpx(jpx) {
@@ -893,10 +898,7 @@ class PartialEvaluator {
       cacheImage(/* jpx = */ null);
       return;
     }
-    const jpxReduce = jpx && {
-      image: jpx.image.reduce,
-      alpha: jpx.alpha?.reduce ?? null,
-    };
+    const jpxReduce = getJpxReduceLevels(jpx);
     if (keepDecodedImage) {
       this.globalImageCache.startDecodedImage(
         imageRef,
@@ -978,10 +980,7 @@ class PartialEvaluator {
           ? imgData.width * imgData.height * 4
           : imgData.data.length;
         imgData.ref = imageRef;
-        imgData.jpxReduce = jpx && {
-          image: jpx.image.reduce,
-          alpha: jpx.alpha?.reduce ?? null,
-        };
+        imgData.jpxReduce = getJpxReduceLevels(jpx);
 
         if (cacheGlobally) {
           this.globalImageCache.addByteSize(imageRef, imgData.dataLen);
@@ -993,7 +992,7 @@ class PartialEvaluator {
 
     decodeImage()
       .catch(reason => {
-        if (!isReducedJpx(jpx)) {
+        if (!(reason instanceof JpxError) || !isReducedJpx(jpx)) {
           throw reason;
         }
         warn(`Unable to decode reduced image "${objId}": "${reason}".`);
