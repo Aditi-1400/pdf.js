@@ -959,17 +959,17 @@ class PartialEvaluator {
       operatorList.hasReducedImages = true;
     }
 
-    PDFImage.buildImage({
-      xref: this.xref,
-      res: resources,
-      image,
-      isInline,
-      pdfFunctionFactory: this._pdfFunctionFactory,
-      globalColorSpaceCache: this.globalColorSpaceCache,
-      localColorSpaceCache,
-      jpx,
-    })
-      .then(async imageObj => {
+    const decodeImage = () =>
+      PDFImage.buildImage({
+        xref: this.xref,
+        res: resources,
+        image,
+        isInline,
+        pdfFunctionFactory: this._pdfFunctionFactory,
+        globalColorSpaceCache: this.globalColorSpaceCache,
+        localColorSpaceCache,
+        jpx,
+      }).then(async imageObj => {
         imgData = await imageObj.createImageData(
           /* forceRGBA = */ false,
           isOffscreenCanvasSupported
@@ -978,7 +978,10 @@ class PartialEvaluator {
           ? imgData.width * imgData.height * 4
           : imgData.data.length;
         imgData.ref = imageRef;
-        imgData.jpxReduce = jpxReduce;
+        imgData.jpxReduce = jpx && {
+          image: jpx.image.reduce,
+          alpha: jpx.alpha?.reduce ?? null,
+        };
 
         if (cacheGlobally) {
           this.globalImageCache.addByteSize(imageRef, imgData.dataLen);
@@ -986,6 +989,19 @@ class PartialEvaluator {
           this.globalImageCache.setDecodedImage(imageRef, imgData);
         }
         return this._sendImgData(objId, imgData, cacheGlobally);
+      });
+
+    decodeImage()
+      .catch(reason => {
+        if (!isReducedJpx(jpx)) {
+          throw reason;
+        }
+        warn(`Unable to decode reduced image "${objId}": "${reason}".`);
+        jpx.image.reduce = jpx.image.minReduce;
+        if (jpx.alpha) {
+          jpx.alpha.reduce = jpx.alpha.minReduce;
+        }
+        return decodeImage();
       })
       .catch(reason =>
         this.#imageDecodeFailed(objId, imageRef, cacheGlobally, reason)
