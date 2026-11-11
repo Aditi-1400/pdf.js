@@ -136,7 +136,6 @@ describe("annotation", function () {
       idFactory: createIdFactory(/* pageIndex = */ 0),
       fontCache: new RefMap(),
       builtInCMapCache,
-      standardFontDataCache: new Map(),
       systemFontCache: new Map(),
     });
   });
@@ -1478,6 +1477,30 @@ describe("annotation", function () {
 
     afterEach(function () {
       widgetDict = null;
+    });
+
+    it("should honor scripted visibility over NoView", async function () {
+      widgetDict.set("F", AnnotationFlag.NOVIEW);
+      const widgetRef = Ref.get(20, 0);
+      const xref = new XRefMock([{ ref: widgetRef, data: widgetDict }]);
+      const annotation = await AnnotationFactory.create(
+        xref,
+        widgetRef,
+        annotationGlobalsMock,
+        idFactoryMock
+      );
+      const entry = {};
+      const storage = new Map([[annotation.data.id, entry]]);
+
+      expect(annotation.mustBeViewed(storage, false)).toBeFalse();
+      entry.noView = false;
+      expect(annotation.mustBeViewed(storage, false)).toBeTrue();
+      entry.noView = true;
+      expect(annotation.mustBeViewed(storage, false)).toBeFalse();
+
+      // renderForms bypasses the stored noView value.
+      expect(annotation.mustBeViewed(storage, true)).toBeTrue();
+      expect(annotation.flags).toEqual(AnnotationFlag.NOVIEW);
     });
 
     it("should handle unknown field names", async function () {

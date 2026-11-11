@@ -29,8 +29,8 @@ const TEST_PDFS_PATH = isNodeJS ? "./test/pdfs/" : "../pdfs/";
 const CMAP_URL = isNodeJS ? "./external/bcmaps/" : "../../external/bcmaps/";
 
 const STANDARD_FONT_DATA_URL = isNodeJS
-  ? "./external/standard_fonts/"
-  : "../../external/standard_fonts/";
+  ? "./external/hellbox/"
+  : "../../external/hellbox/";
 
 const WASM_URL = isNodeJS
   ? "./build/generic-legacy/web/wasm/"
@@ -55,7 +55,7 @@ async function fetchBuiltInCMapHelper(binaryDataFactory, cMapPacked, name) {
       kind: "cMapUrl",
       filename: `${name}${cMapPacked ? ".bcmap" : ""}`,
     }),
-    isCompressed: cMapPacked,
+    cMapPacked,
   };
 }
 

@@ -41,8 +41,8 @@ const THUMBNAIL_WIDTH = 126; // px
  * @property {PDFLinkService} linkService - The navigation/linking service.
  * @property {PDFRenderingQueue} renderingQueue - The rendering queue object.
  * @property {number} [maxCanvasPixels] - The maximum supported canvas size in
- *   total pixels, i.e. width * height. Use `-1` for no limit, or `0` for
- *   CSS-only zooming. The default value is 4096 * 8192 (32 mega-pixels).
+ *   total pixels, i.e. width * height. Use `-1` for no limit.
+ *   The default value is 4096 * 8192 (32 mega-pixels).
  * @property {number} [maxCanvasDim] - The maximum supported canvas dimension,
  *   in either width or height. Use `-1` for no limit.
  *   The default value is 32767.
@@ -92,7 +92,7 @@ class PDFThumbnailView extends RenderableView {
     this.viewport = defaultViewport;
     this.pdfPageRotate = defaultViewport.rotation;
     this._optionalContentConfigPromise = optionalContentConfigPromise || null;
-    this.maxCanvasPixels = maxCanvasPixels ?? AppOptions.get("maxCanvasPixels");
+    this.maxCanvasPixels = maxCanvasPixels || AppOptions.get("maxCanvasPixels");
     this.maxCanvasDim = maxCanvasDim || AppOptions.get("maxCanvasDim");
     this.pageColors = pageColors || null;
 
@@ -329,7 +329,7 @@ class PDFThumbnailView extends RenderableView {
       ? [outputScale.sx, 0, 0, outputScale.sy, 0, 0]
       : null;
 
-    return { canvas, transform };
+    return { canvas, transform, outputScale };
   }
 
   async #convertCanvasToImage(canvas) {
@@ -366,7 +366,8 @@ class PDFThumbnailView extends RenderableView {
     // the `draw` and `setImage` methods (fixes issue 8233).
     // NOTE: To primarily avoid increasing memory usage too much, but also to
     //   reduce downsizing overhead, we purposely limit the up-scaling factor.
-    const { canvas, transform } = this.#getPageDrawContext(DRAW_UPSCALE_FACTOR);
+    const { canvas, transform, outputScale } =
+      this.#getPageDrawContext(DRAW_UPSCALE_FACTOR);
     const drawViewport = this.viewport.clone({
       scale: DRAW_UPSCALE_FACTOR * this.scale,
     });
@@ -388,6 +389,7 @@ class PDFThumbnailView extends RenderableView {
       viewport: drawViewport,
       optionalContentConfigPromise: this._optionalContentConfigPromise,
       pageColors,
+      imageOutputScale: outputScale.sx,
     };
     const renderTask = (this.renderTask = pdfPage.render(renderContext));
     renderTask.onContinue = renderContinueCallback;

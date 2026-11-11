@@ -39,6 +39,7 @@ import {
   collectActions,
   getInheritableProperty,
   getNewAnnotationsMap,
+  IDENTITY_MATRIX,
   isWhiteSpace,
   lookupNormalRect,
   MissingDataException,
@@ -95,7 +96,6 @@ class Page {
     globalIdFactory,
     fontCache,
     builtInCMapCache,
-    standardFontDataCache,
     globalColorSpaceCache,
     globalImageCache,
     systemFontCache,
@@ -109,7 +109,6 @@ class Page {
     this.ref = ref;
     this.fontCache = fontCache;
     this.builtInCMapCache = builtInCMapCache;
-    this.standardFontDataCache = standardFontDataCache;
     this.globalColorSpaceCache = globalColorSpaceCache;
     this.globalImageCache = globalImageCache;
     this.systemFontCache = systemFontCache;
@@ -134,7 +133,8 @@ class Page {
   _createPartialEvaluator(
     handler,
     pageIndex = this.pageIndex,
-    pageProxyId = null
+    pageProxyId = null,
+    imageScale = 0
   ) {
     // Used to route page-local objects to the main-thread PDFPageProxy.
 
@@ -143,10 +143,10 @@ class Page {
       handler,
       pageIndex,
       pageProxyId,
+      imageScale,
       idFactory: this._localIdFactory,
       fontCache: this.fontCache,
       builtInCMapCache: this.builtInCMapCache,
-      standardFontDataCache: this.standardFontDataCache,
       globalColorSpaceCache: this.globalColorSpaceCache,
       globalImageCache: this.globalImageCache,
       systemFontCache: this.systemFontCache,
@@ -486,6 +486,7 @@ class Page {
     pageProxyId = null,
     annotationStorage = null,
     modifiedIds = null,
+    imageScale = 0,
   }) {
     const contentStreamPromise = this.getContentStream();
     const resourcesPromise = this.loadResources(RESOURCES_KEYS_OPERATOR_LIST);
@@ -493,7 +494,8 @@ class Page {
     const partialEvaluator = this._createPartialEvaluator(
       handler,
       pageIndex,
-      pageProxyId
+      pageProxyId,
+      imageScale
     );
 
     const newAnnotsByPage = !this.xfaFactory
@@ -587,6 +589,7 @@ class Page {
         task,
         resources,
         operatorList: opList,
+        initialCtm: IDENTITY_MATRIX,
       });
       return opList;
     });
@@ -1076,7 +1079,6 @@ class PDFDocument {
       globalIdFactory: this._globalIdFactory,
       fontCache: catalog.fontCache,
       builtInCMapCache: catalog.builtInCMapCache,
-      standardFontDataCache: catalog.standardFontDataCache,
       globalColorSpaceCache: catalog.globalColorSpaceCache,
       globalImageCache: catalog.globalImageCache,
       systemFontCache: catalog.systemFontCache,
@@ -1390,7 +1392,7 @@ class PDFDocument {
       this.pdfManager.evaluatorOptions,
       { useSystemFonts: false }
     );
-    const { builtInCMapCache, fontCache, standardFontDataCache } = this.catalog;
+    const { builtInCMapCache, fontCache } = this.catalog;
 
     const partialEvaluator = new PartialEvaluator({
       xref: this.xref,
@@ -1399,7 +1401,6 @@ class PDFDocument {
       idFactory: this._globalIdFactory,
       fontCache,
       builtInCMapCache,
-      standardFontDataCache,
       options,
     });
     const operatorList = new OperatorList();

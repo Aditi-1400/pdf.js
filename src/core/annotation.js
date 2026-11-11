@@ -1319,6 +1319,7 @@ class Annotation {
       resources,
       operatorList: opList,
       fallbackFontDict: this._fallbackFontDict,
+      initialCtm: Util.transform(transform, matrix),
     });
     opList.addOp(OPS.endAnnotation, []);
 
@@ -2093,6 +2094,11 @@ class WidgetAnnotation extends Annotation {
     if (renderForms) {
       return this.viewable;
     }
+    // Stored noView overrides flags when rendering widgets on canvas.
+    const noView = annotationStorage?.get(this.data.id)?.noView;
+    if (noView !== undefined) {
+      return !noView;
+    }
     return (
       super.mustBeViewed(annotationStorage, renderForms) &&
       !this._hasFlag(this.flags, AnnotationFlag.NOVIEW)
@@ -2212,6 +2218,7 @@ class WidgetAnnotation extends Annotation {
     const matrix = [1, 0, 0, 1, 0, 0];
     const bbox = [0, 0, this.width, this.height];
     const transform = getTransformMatrix(this.data.rect, bbox, matrix);
+    const rotationMatrix = this.getRotationMatrix(annotationStorage);
 
     const optionalContent = this._oc;
     if (optionalContent !== undefined) {
@@ -2222,7 +2229,7 @@ class WidgetAnnotation extends Annotation {
       this.data.id,
       this.data.rect,
       transform,
-      this.getRotationMatrix(annotationStorage),
+      rotationMatrix,
       isUsingOwnCanvas,
     ]);
 
@@ -2232,6 +2239,7 @@ class WidgetAnnotation extends Annotation {
       task,
       resources: this._fieldResources.mergedResources,
       operatorList: opList,
+      initialCtm: Util.transform(transform, rotationMatrix),
     });
     opList.addOp(OPS.endAnnotation, []);
 
@@ -2712,26 +2720,14 @@ class WidgetAnnotation extends Annotation {
   }
 
   static async _getFontData(evaluator, task, appearanceData, resources) {
-    const operatorList = new OperatorList();
-    const initialState = {
-      font: null,
-      clone() {
-        return this;
-      },
-    };
-
-    const { fontName, fontSize } = appearanceData;
-    await evaluator.handleSetFont(
+    // loadFont avoids the font transfer performed by handleSetFont.
+    const { font } = await evaluator.loadFont(
+      appearanceData.fontName || null,
+      /* font = */ null,
       resources,
-      [fontName && Name.get(fontName), fontSize],
-      /* fontRef = */ null,
-      operatorList,
-      task,
-      initialState,
-      /* fallbackFontDict = */ null
+      task
     );
-
-    return initialState.font;
+    return font;
   }
 
   _getTextWidth(text, font) {

@@ -1790,6 +1790,13 @@
     "type": "eq"
   },
   {
+    "id": "postscript-type4-stack-depth",
+    "file": "pdfs/postscript_type4_stack_depth.pdf",
+    "md5": "e7ea6f3875e1a977e6a9012e776a64af",
+    "rounds": 1,
+    "type": "eq"
+  },
+  {
     "id": "xref_command_missing",
     "file": "pdfs/xref_command_missing.pdf",
     "md5": "06cdb0f13cfeff41d6bfb24b7bbe1268",
@@ -4037,6 +4044,14 @@
     "md5": "c4f890b4a5b6f21653421856335181d5",
     "rounds": 1,
     "type": "eq"
+  },
+  {
+    "id": "issue11915_no_system_fonts",
+    "file": "pdfs/issue11915.pdf",
+    "md5": "c4f890b4a5b6f21653421856335181d5",
+    "rounds": 1,
+    "type": "eq",
+    "useSystemFonts": false
   },
   {
     "id": "issue10614",
@@ -7672,6 +7687,20 @@
     "id": "issue14165",
     "file": "pdfs/issue14165.pdf",
     "md5": "917850af2a387475b34b00010200897d",
+    "rounds": 1,
+    "type": "eq"
+  },
+  {
+    "id": "issue22486",
+    "file": "pdfs/issue22486.pdf",
+    "md5": "ad75625ab35e87a544d6ed3487535fde",
+    "rounds": 1,
+    "type": "eq"
+  },
+  {
+    "id": "issue22487",
+    "file": "pdfs/issue22487.pdf",
+    "md5": "bf7cf6b10d6e064d4a9aaa7ae0436eb3",
     "rounds": 1,
     "type": "eq"
   },
@@ -15304,5 +15333,38 @@
       }
     },
     "about": "Print the /MK /CA star with NeedAppearances."
+  },
+  {
+    "id": "issue18768_1",
+    "file": "pdfs/issue18768_1.pdf",
+    "md5": "9ea22e419297ee29e2255a98a71753a3",
+    "rounds": 1,
+    "link": true,
+    "type": "other"
+  },
+  {
+    "id": "issue18768_2",
+    "file": "pdfs/issue18768_2.pdf",
+    "md5": "d8c277668182811961ed4c0e9495bfc5",
+    "rounds": 1,
+    "link": true,
+    "type": "other"
+  },
+  {
+    "id": "issue22462",
+    "file": "pdfs/issue22462.pdf",
+    "md5": "912171b8508889cc36b7002ad2876467",
+    "rounds": 1,
+    "type": "eq",
+    "about": "Short loca offsets overflow after duplicating glyph 0."
+  },
+  {
+    "id": "xfa_issue22023",
+    "file": "pdfs/xfa_issue22023.pdf",
+    "md5": "44b75da68e9ccc5c24dc4f9ea05399bf",
+    "rounds": 1,
+    "enableXfa": true,
+    "type": "eq",
+    "about": "XFA rich text with b and i elements."
   }
 ]
